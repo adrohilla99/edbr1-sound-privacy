@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+.uv/
+.pytest_cache/
+.ipynb_checkpoints/
+*.egg-info/
+build/
+dist/
+
+# Data (not tracked under any circumstances)
+data/raw/
+data/processed/
+
+# Audio artefacts
+*.wav
+*.flac
+*.mp3
+*.ogg
+
+# Model artefacts
+*.pt
+*.ckpt
+*.onnx
+
+# Secrets / OS
+.env
+.DS_Store
+
+# Editors (allow project-level VS Code settings if added later)
+.vscode/*
+!.vscode/settings.json
+
+# Experiment tracking
+wandb/
+mlruns/
+lightning_logs/

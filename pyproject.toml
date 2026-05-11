@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "edbr1"
+version = "0.0.1"
+description = "EDBR.1 — Detecting Sounds with Privacy. Privacy–utility–compute trade-offs of low-bitrate on-device audio encoders for environmental sound classification, evaluated against adversarial speech-leakage probes."
+requires-python = ">=3.11,<3.13"
+readme = "README.md"
+authors = [
+    { name = "EDBR.1 MSc dissertation", email = "noreply@warwick.ac.uk" },
+]
+dependencies = [
+    "numpy",
+    "pandas",
+    "pyyaml",
+    "tqdm",
+    "rich",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "ruff",
+    "mypy",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
