@@ -13,11 +13,15 @@ Source:     https://www.openslr.org/12
 Size:       ~30 GB on disk for the three permitted subsets combined.
 
 ============================================================
-WARNING: DO NOT RUN UNTIL ETHICS WAIVER IS APPROVED -- see README.md
+ETHICS: waiver APPROVED. This script still refuses to download anything
+without the explicit --i-have-ethics-approval flag, and it hard-refuses
+any LibriSpeech subset outside the three permitted above.
 ============================================================
-This script will refuse to download anything without the explicit
---i-have-ethics-approval flag, and even with the flag the download
-function is not yet implemented (will raise NotImplementedError).
+
+Files come from OpenSLR resource 12. OpenSLR publishes an MD5 for every
+archive; those constants are embedded below and every download is verified
+against them. The operation is idempotent (verified archives and already
+extracted subsets are skipped).
 """
 from __future__ import annotations
 
@@ -25,19 +29,54 @@ import argparse
 import sys
 from pathlib import Path
 
+from _download_common import download_file, extract_archive, require_present
+
 WARNING = (
-    "WARNING: DO NOT RUN UNTIL ETHICS WAIVER IS APPROVED.\n"
-    "See README.md. Re-run with --i-have-ethics-approval to proceed."
+    "WARNING: download gated behind ethics acknowledgement.\n"
+    "Re-run with --i-have-ethics-approval to proceed."
 )
 
 DATASET_NAME = "librispeech"
 ALLOWED_SUBSETS = ("test-clean", "dev-clean", "train-clean-100")
 
+OPENSLR_BASE = "https://www.openslr.org/resources/12"
+
+# MD5 checksums as published on https://www.openslr.org/12/ . Keyed by
+# subset; only the three permitted subsets are listed, by design -- there
+# is deliberately no entry for train-clean-360 or train-other-500.
+SUBSET_MD5 = {
+    "dev-clean": "42e2234ba48799c1f50f24a7926300a1",
+    "test-clean": "32fa31d27d2e1cad72775fee3f4849a9",
+    "train-clean-100": "2a93770f6d5c6c964bc36631d331a522",
+}
+
 
 def download(target_dir: Path, subsets: tuple[str, ...]) -> None:
-    raise NotImplementedError(
-        "Implement after ethics approval -- see TODO.md"
-    )
+    """Download and extract the permitted LibriSpeech ``subsets``."""
+    # Defence in depth: argparse already restricts choices, but a direct
+    # call to download() must not be able to smuggle in a forbidden subset.
+    forbidden = [s for s in subsets if s not in ALLOWED_SUBSETS]
+    if forbidden:
+        raise ValueError(
+            "Refusing to download non-permitted LibriSpeech subset(s): "
+            f"{', '.join(forbidden)}. Only {', '.join(ALLOWED_SUBSETS)} are in scope."
+        )
+
+    for subset in subsets:
+        md5 = SUBSET_MD5[subset]
+        archive_name = f"{subset}.tar.gz"
+        url = f"{OPENSLR_BASE}/{archive_name}"
+        print(f"== {subset} ==")
+        archive = target_dir / archive_name
+        download_file(url, archive, expected_hash=md5, algorithm="md5")
+
+        # Archives expand to LibriSpeech/<subset>/... Use the subset
+        # directory as the idempotency marker.
+        subset_dir = target_dir / "LibriSpeech" / subset
+        extract_archive(archive, target_dir, marker=subset_dir)
+        require_present([subset_dir])
+
+    print(f"[done] LibriSpeech subsets ready: {', '.join(subsets)}")
 
 
 def main() -> int:
