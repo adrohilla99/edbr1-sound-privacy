@@ -1,0 +1,21 @@
+# UrbanSound8K small-CNN baseline configuration
+# (see src/edbr1/config.py:TrainConfig). Used by `python -m edbr1.train`.
+seed: 1337
+batch_size: 64
+epochs: 50
+learning_rate: 0.001
+weight_decay: 0.0001
+num_workers: 0
+clip_seconds: 4.0
+test_folds: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+
+features:
+  sample_rate: 16000
+  n_mels: 64
+  window_ms: 25.0
+  hop_ms: 10.0
+  f_min: 0.0
+  f_max: null
+  n_fft: null
+  power: 2.0
+  top_db: 80.0

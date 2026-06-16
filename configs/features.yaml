@@ -1,0 +1,11 @@
+# Log-mel front-end configuration (see src/edbr1/config.py:FeatureConfig).
+# 16 kHz mono, 64 mel bands, 25 ms window, 10 ms hop.
+sample_rate: 16000
+n_mels: 64
+window_ms: 25.0
+hop_ms: 10.0
+f_min: 0.0
+f_max: null        # null -> Nyquist (sample_rate / 2)
+n_fft: null        # null -> next power of two >= window length
+power: 2.0
+top_db: 80.0
