@@ -2,9 +2,10 @@
 
 Privacy–utility–compute trade-offs of low-bitrate on-device audio encoders for environmental sound classification, evaluated against adversarial speech-leakage probes.
 
-Status: Day 1 scaffolding. Ethics approval: PENDING.
+Status: Baseline pipeline in place. Ethics approval: APPROVED.
 
-> **Do not run data download scripts until ethics waiver is approved.**
+> Download scripts are enabled but still gated: they require the explicit
+> `--i-have-ethics-approval` flag and verify dataset integrity before use.
 
 ## Quickstart
 
@@ -24,8 +25,11 @@ python -m venv .venv
 # Activate (POSIX shells)
 # source .venv/bin/activate
 
-# 4. Install in editable mode with dev extras
+# 4. Install in editable mode.
+#    Lightweight (scaffolding, downloaders, config/split logic, tests):
 pip install -e ".[dev]"
+#    Full ML/audio stack (features, model, training):
+pip install -e ".[dev,ml]"
 
 # 5. Sanity check the environment
 python scripts/verify_environment.py
@@ -33,6 +37,36 @@ python scripts/verify_environment.py
 # 6. Run the smoke test
 pytest -q
 ```
+
+## Running the pipeline (download → preprocess → train)
+
+Requires the `ml` extra installed (`pip install -e ".[dev,ml]"`) and the
+approved ethics waiver. Datasets and run outputs are gitignored.
+
+```bash
+# 1. Download UrbanSound8K (gated; verifies MD5 from Zenodo before use)
+python scripts/download_urbansound8k.py --i-have-ethics-approval
+#    LibriSpeech (only test-clean/dev-clean/train-clean-100) and ESC-50:
+python scripts/download_librispeech.py --i-have-ethics-approval
+python scripts/download_esc50.py --i-have-ethics-approval
+
+# 2. Preprocess sanity check: log-mel spectrograms on fold 1 only
+#    (writes a PNG under results/)
+python scripts/plot_spectrograms.py \
+    --root data/raw/urbansound8k/UrbanSound8K
+
+# 3. Train the baseline under the official 10-fold CV and report macro-F1
+#    (per-fold confusion matrices + results.json land in results/<run>/)
+python -m edbr1.train \
+    --root data/raw/urbansound8k/UrbanSound8K \
+    --config configs/baseline.yaml
+#    Quick smoke (2 folds, 1 epoch):
+python -m edbr1.train --epochs 1 --test-folds 1 2
+```
+
+Feature parameters (16 kHz, 64 mel bands, 25 ms window, 10 ms hop) and
+training hyper-parameters are config-driven via `configs/` — see
+[`src/edbr1/config.py`](src/edbr1/config.py).
 
 ## Project layout
 
@@ -43,6 +77,9 @@ pytest -q
 ├── .gitignore
 ├── .python-version
 ├── TODO.md
+├── configs/                  # feature + training configs (YAML)
+│   ├── features.yaml
+│   └── baseline.yaml
 ├── docs/
 │   ├── 00_project_brief.md
 │   ├── 01_research_questions.md
@@ -53,16 +90,29 @@ pytest -q
 │   ├── raw/         # gitignored
 │   ├── processed/   # gitignored
 │   └── README.md
+├── results/         # run outputs (gitignored)
 ├── scripts/
+│   ├── _download_common.py   # shared download helpers (stdlib + tqdm)
 │   ├── download_urbansound8k.py
 │   ├── download_librispeech.py
 │   ├── download_esc50.py
+│   ├── plot_spectrograms.py  # fold-1 sanity check
 │   └── verify_environment.py
 ├── src/
 │   └── edbr1/
-│       └── __init__.py
+│       ├── __init__.py
+│       ├── config.py         # FeatureConfig / TrainConfig
+│       ├── data/             # UrbanSound8K loader + fold split
+│       ├── features/         # log-mel extractor
+│       ├── models/           # compact CNN
+│       ├── utils/            # seeding
+│       ├── evaluate.py       # macro-F1, per-class F1, confusion matrix
+│       └── train.py          # 10-fold CV entry point
 ├── tests/
-│   └── test_smoke.py
+│   ├── test_smoke.py
+│   ├── test_config.py
+│   ├── test_splits.py
+│   └── test_features.py
 └── notebooks/
 ```
 

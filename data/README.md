@@ -19,10 +19,11 @@ data/
 
 ## Status
 
-Ethics approval is **PENDING**. No datasets may be downloaded yet. The
-scripts under `scripts/` are placeholders and will refuse to run without
-an explicit `--i-have-ethics-approval` flag, and even with the flag they
-currently raise `NotImplementedError` until Day 2.
+Ethics approval is **APPROVED**. The download scripts under `scripts/` are
+implemented and may be run, but remain gated: they refuse to run without an
+explicit `--i-have-ethics-approval` flag and verify dataset integrity
+(checksums where the source publishes them) before extraction. Contents of
+`data/raw/` and `data/processed/` remain gitignored under all circumstances.
 
 ## On-disk size (approximate, plan accordingly)
 

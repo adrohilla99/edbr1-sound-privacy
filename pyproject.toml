@@ -24,6 +24,20 @@ dev = [
     "pytest",
     "ruff",
     "mypy",
+    "pandas-stubs",
+    "types-PyYAML",
+]
+# Heavyweight ML / audio stack. Kept out of the base install so the
+# scaffolding, download scripts and config/split logic stay lightweight.
+# Install with:  pip install -e ".[ml]"   (or ".[dev,ml]")
+ml = [
+    "torch",
+    "torchaudio",
+    "soundfile",
+    "librosa",
+    "scikit-learn",
+    "matplotlib",
+    "seaborn",
 ]
 
 [tool.setuptools.packages.find]
@@ -31,3 +45,21 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "scripts", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "W"]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["src", "scripts", "tests"]
+mypy_path = ["src", "scripts"]
+ignore_missing_imports = true
+explicit_package_bases = true
+warn_redundant_casts = true
+warn_unused_ignores = false
+no_implicit_optional = true
