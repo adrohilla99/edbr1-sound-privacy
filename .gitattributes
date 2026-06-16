@@ -1,0 +1,29 @@
+# Normalise line endings: store text as LF in the repo, let Git convert to
+# the platform's native endings on checkout. Silences the LF/CRLF warnings
+# on Windows without committing CRLF.
+* text=auto eol=lf
+
+# Explicit text types (belt-and-braces for the file kinds in this repo).
+*.py    text eol=lf
+*.pyi   text eol=lf
+*.md    text eol=lf
+*.txt   text eol=lf
+*.toml  text eol=lf
+*.cfg   text eol=lf
+*.ini   text eol=lf
+*.yaml  text eol=lf
+*.yml   text eol=lf
+*.json  text eol=lf
+*.gitignore text eol=lf
+
+# Binary / artefact types: never touch (also gitignored, but be explicit).
+*.wav   binary
+*.flac  binary
+*.mp3   binary
+*.ogg   binary
+*.pt    binary
+*.ckpt  binary
+*.onnx  binary
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
