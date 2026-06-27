@@ -1,0 +1,59 @@
+# UrbanSound8K small-CNN -- 22.05 kHz experiment (REJECTED LEVER; kept as evidence).
+#
+# Identical to configs/baseline_final.yaml in every respect EXCEPT the sample
+# rate: 22_050 Hz instead of 16_000 Hz. 22.05 kHz preserves more high-frequency
+# detail (helpful for classes like siren and car_horn) at ~1.4x the compute.
+# Window/hop are specified in milliseconds, so the per-second frame rate (and
+# therefore the SpecAugment mask widths in frames) is unchanged -- only the
+# spectral resolution changes. This isolates sample rate as the single lever.
+#
+# RESULT: a 3-fold check looked promising (+0.013) but the full 10-fold A/B
+# showed NO gain -- 0.739 vs 0.746 at 16 kHz -- so 16 kHz (baseline_final.yaml)
+# remains canonical. This file is retained as the evidence behind that finding.
+seed: 1337
+batch_size: 64
+epochs: 80                # upper bound; early stopping usually halts sooner
+learning_rate: 0.001
+weight_decay: 0.0001
+num_workers: 8           # parallel CPU input pipeline (decode/resample/augment);
+#                          per-worker RNG seeded by seed_worker for reproducibility
+clip_seconds: 4.0
+norm: per_band            # "global" (baseline) | "per_band"
+test_folds: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+
+features:
+  sample_rate: 22050      # the only change vs baseline_final.yaml (was 16000)
+  n_mels: 64
+  window_ms: 25.0
+  hop_ms: 10.0
+  f_min: 0.0
+  f_max: null             # -> Nyquist (11025 Hz at 22.05 kHz)
+  n_fft: null             # -> next power of two >= win_length (1024 here)
+  power: 2.0
+  top_db: 80.0
+
+augment:
+  enabled: true
+  spec_augment: true
+  time_masks: 2
+  time_mask_param: 24
+  freq_masks: 2
+  freq_mask_param: 8
+  spec_augment_prob: 1.0
+  time_shift: true
+  time_shift_ms: 100.0
+  pitch_shift: false      # slower (librosa); enable to trade compute for invariance
+  pitch_shift_steps: 2.0
+  time_stretch: false     # slower (librosa)
+  time_stretch_min: 0.9
+  time_stretch_max: 1.1
+  waveform_prob: 0.5
+
+schedule:
+  scheduler: cosine       # "none" | "cosine" | "plateau"
+  early_stopping: true
+  patience: 12
+  min_delta: 0.0
+  val_fold: null          # null -> highest-numbered training fold
+  plateau_factor: 0.5
+  plateau_patience: 5

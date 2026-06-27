@@ -1,0 +1,66 @@
+# UrbanSound8K small-CNN -- CANONICAL regularised baseline.
+#
+# This is the reference config for the dissertation: the regularised recipe at
+# 16 kHz, reaching 0.746 +/- 0.050 mean macro-F1 over the official 10-fold CV
+# (in the published ~0.73-0.76 band). See RESULTS.md for the full ablation.
+#
+# Same architecture and log-mel front end as baseline.yaml, but with the
+# standard overfitting-reduction recipe enabled. The plain baseline (0.626
+# mean macro-F1) drives training loss to ~0.05 every fold while test scores
+# swing 0.41-0.77 -- classic overfitting -- so this config adds:
+#   * SpecAugment + a light waveform time-shift  (training folds ONLY)
+#   * per-mel-band normalisation (stats from training folds only)
+#   * cosine LR schedule
+#   * early stopping on a held-out training fold, best checkpoint restored
+#
+# Every lever is a flag; baseline.yaml leaves them off and stays reproducible.
+# 22.05 kHz was tested as a further lever (configs/improved_22k.yaml) and gave
+# NO gain at 10-fold (0.739 vs 0.746) for ~1.4x the compute -- so 16 kHz stays.
+seed: 1337
+batch_size: 64
+epochs: 80                # upper bound; early stopping usually halts sooner
+learning_rate: 0.001
+weight_decay: 0.0001
+num_workers: 8           # parallel CPU input pipeline (decode/resample/augment);
+#                          per-worker RNG seeded by seed_worker for reproducibility
+clip_seconds: 4.0
+norm: per_band            # "global" (baseline) | "per_band"
+test_folds: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+
+features:
+  sample_rate: 16000      # canonical. 22050 was A/B-tested at 10-fold and did
+                          # not help (see RESULTS.md / configs/improved_22k.yaml).
+  n_mels: 64
+  window_ms: 25.0
+  hop_ms: 10.0
+  f_min: 0.0
+  f_max: null
+  n_fft: null
+  power: 2.0
+  top_db: 80.0
+
+augment:
+  enabled: true
+  spec_augment: true
+  time_masks: 2
+  time_mask_param: 24
+  freq_masks: 2
+  freq_mask_param: 8
+  spec_augment_prob: 1.0
+  time_shift: true
+  time_shift_ms: 100.0
+  pitch_shift: false      # slower (librosa); enable to trade compute for invariance
+  pitch_shift_steps: 2.0
+  time_stretch: false     # slower (librosa)
+  time_stretch_min: 0.9
+  time_stretch_max: 1.1
+  waveform_prob: 0.5
+
+schedule:
+  scheduler: cosine       # "none" | "cosine" | "plateau"
+  early_stopping: true
+  patience: 12
+  min_delta: 0.0
+  val_fold: null          # null -> highest-numbered training fold
+  plateau_factor: 0.5
+  plateau_patience: 5

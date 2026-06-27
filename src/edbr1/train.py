@@ -37,16 +37,17 @@ from torch import Tensor, nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from edbr1.config import TrainConfig, config_to_dict, load_train_config
+from edbr1.config import ScheduleConfig, TrainConfig, config_to_dict, load_train_config
 from edbr1.data.urbansound8k import (
     URBANSOUND8K_CLASSES,
     UrbanSound8KDataset,
+    carve_validation_fold,
     load_metadata,
     train_test_fold_split,
 )
 from edbr1.evaluate import classification_metrics, save_confusion_matrix
 from edbr1.models import SmallAudioCNN
-from edbr1.utils import seed_everything
+from edbr1.utils import seed_everything, seed_worker
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
@@ -57,31 +58,94 @@ def _pick_device(requested: str) -> torch.device:
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def compute_norm_stats(loader: DataLoader[tuple[Tensor, int]]) -> tuple[float, float]:
-    """Global mean/std of the log-mel features over a (training) loader.
+def _make_loader(
+    dataset: UrbanSound8KDataset,
+    *,
+    shuffle: bool,
+    config: TrainConfig,
+    device: torch.device,
+    num_workers: int | None = None,
+    persistent: bool = False,
+) -> DataLoader[tuple[Tensor, int]]:
+    """Build a DataLoader with CUDA-friendly, reproducible settings.
 
-    Standardising features with statistics estimated on the *training*
-    folds only (never the test fold) is important for reaching the
-    published baseline and avoids leaking test statistics.
+    ``num_workers`` defaults to ``config.num_workers``; pass ``0`` to force a
+    single-process loader (used for the small validation/test passes to keep
+    peak worker-process memory bounded). With workers enabled, ``seed_worker``
+    makes per-worker augmentation reproducible and ``pin_memory`` is set on the
+    CUDA path. ``persistent`` keeps workers alive across epochs (worth it for
+    the repeatedly-iterated training loader; avoids Windows re-spawn overhead).
     """
-    total = 0.0
-    total_sq = 0.0
-    count = 0
+    nw = config.num_workers if num_workers is None else num_workers
+    kwargs: dict[str, Any] = {
+        "batch_size": config.batch_size,
+        "shuffle": shuffle,
+        "num_workers": nw,
+        "pin_memory": device.type == "cuda",
+    }
+    if nw > 0:
+        kwargs["worker_init_fn"] = seed_worker
+        kwargs["persistent_workers"] = persistent
+    return DataLoader(dataset, **kwargs)
+
+
+def compute_norm_stats(
+    loader: DataLoader[tuple[Tensor, int]], *, per_band: bool
+) -> tuple[Tensor, Tensor]:
+    """Mean/std of the log-mel features over a (training) loader.
+
+    Standardising features with statistics estimated on the *training* folds
+    only (never the test or validation fold) is important for reaching the
+    published baseline and avoids leaking held-out statistics.
+
+    Returns broadcastable tensors shaped ``(1, 1, n_mels, 1)`` when
+    ``per_band`` (a mean/std per mel band) or ``(1, 1, 1, 1)`` for a single
+    global scalar. The global path reproduces the original scalar computation
+    exactly so the plain baseline is unchanged.
+    """
+    if not per_band:
+        total = 0.0
+        total_sq = 0.0
+        count = 0
+        for x, _ in tqdm(loader, desc="  norm-stats", leave=False):
+            total += float(x.sum())
+            total_sq += float((x * x).sum())
+            count += x.numel()
+        mean = total / count
+        std = max(total_sq / count - mean * mean, 1e-12) ** 0.5
+        return (
+            torch.tensor(mean, dtype=torch.float32).view(1, 1, 1, 1),
+            torch.tensor(std, dtype=torch.float32).view(1, 1, 1, 1),
+        )
+
+    # Per-band: reduce over batch, channel and time, keeping the mel axis.
+    # Accumulate in float64 for numerical stability across the dataset.
+    sum_b: Tensor | None = None
+    sumsq_b: Tensor | None = None
+    count_b = 0
     for x, _ in tqdm(loader, desc="  norm-stats", leave=False):
-        total += float(x.sum())
-        total_sq += float((x * x).sum())
-        count += x.numel()
-    mean = total / count
-    var = max(total_sq / count - mean * mean, 1e-12)
-    return mean, var**0.5
+        xd = x.double()
+        s = xd.sum(dim=(0, 1, 3))
+        sq = (xd * xd).sum(dim=(0, 1, 3))
+        sum_b = s if sum_b is None else sum_b + s
+        sumsq_b = sq if sumsq_b is None else sumsq_b + sq
+        count_b += x.shape[0] * x.shape[1] * x.shape[3]
+    assert sum_b is not None and sumsq_b is not None
+    mean_b = sum_b / count_b
+    var_b = (sumsq_b / count_b - mean_b * mean_b).clamp_min(1e-12)
+    std_b = var_b.sqrt()
+    return (
+        mean_b.to(torch.float32).view(1, 1, -1, 1),
+        std_b.to(torch.float32).view(1, 1, -1, 1),
+    )
 
 
 def _run_epoch(
     model: nn.Module,
     loader: DataLoader[tuple[Tensor, int]],
     device: torch.device,
-    mean: float,
-    std: float,
+    mean: Tensor,
+    std: Tensor,
     *,
     optimizer: torch.optim.Optimizer | None,
 ) -> tuple[float, list[int], list[int]]:
@@ -117,6 +181,32 @@ def _run_epoch(
     return running_loss / max(seen, 1), y_true, y_pred
 
 
+def _build_scheduler(
+    optimizer: torch.optim.Optimizer, schedule: ScheduleConfig, epochs: int
+) -> Any:
+    """Construct the LR scheduler named by ``schedule`` (or ``None``)."""
+    if schedule.scheduler == "none":
+        return None
+    if schedule.scheduler == "cosine":
+        return torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
+    if schedule.scheduler == "plateau":
+        return torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode="max",
+            factor=schedule.plateau_factor,
+            patience=schedule.plateau_patience,
+        )
+    raise ValueError(f"Unknown scheduler: {schedule.scheduler!r}")
+
+
+def _pick_val_fold(train_df: Any, schedule: ScheduleConfig) -> int:
+    """Choose which training fold to hold out for validation (deterministic)."""
+    folds = sorted(set(train_df["fold"].unique()))
+    if schedule.val_fold is not None:
+        return int(schedule.val_fold)
+    return int(folds[-1])  # highest-numbered training fold
+
+
 def train_one_fold(
     metadata: object,
     test_fold: int,
@@ -124,31 +214,69 @@ def train_one_fold(
     device: torch.device,
     class_names: Sequence[str],
 ) -> dict[str, Any]:
-    """Train on all folds except ``test_fold`` and evaluate on it."""
+    """Train on all folds except ``test_fold`` and evaluate on it.
+
+    When early stopping (or a plateau scheduler) is configured, one training
+    fold is carved off as a validation set; the best-by-validation checkpoint
+    is restored before the held-out test fold is scored. Normalisation stats
+    are always estimated on the (inner) training folds only.
+    """
     import pandas as pd
 
     assert isinstance(metadata, pd.DataFrame)
     seed_everything(config.seed + test_fold)
+    schedule = config.schedule
+    needs_val = schedule.early_stopping or schedule.scheduler == "plateau"
 
     train_df, test_df = train_test_fold_split(metadata, test_fold)
-    train_ds = UrbanSound8KDataset(train_df, config.features, config.clip_seconds)
-    test_ds = UrbanSound8KDataset(test_df, config.features, config.clip_seconds)
+    val_fold: int | None = None
+    val_df = None
+    if needs_val:
+        val_fold = _pick_val_fold(train_df, schedule)
+        train_df, val_df = carve_validation_fold(train_df, val_fold)
 
-    train_loader: DataLoader[tuple[Tensor, int]] = DataLoader(
-        train_ds,
-        batch_size=config.batch_size,
-        shuffle=True,
-        num_workers=config.num_workers,
-        drop_last=False,
+    augment = config.augment if config.augment.enabled else None
+    train_ds = UrbanSound8KDataset(
+        train_df, config.features, config.clip_seconds, train=True, augment=augment
     )
-    test_loader: DataLoader[tuple[Tensor, int]] = DataLoader(
-        test_ds,
-        batch_size=config.batch_size,
-        shuffle=False,
-        num_workers=config.num_workers,
+    test_ds = UrbanSound8KDataset(
+        test_df, config.features, config.clip_seconds, train=False
     )
 
-    mean, std = compute_norm_stats(train_loader)
+    # Training loader: workers (parallel CPU decode/resample/augment) kept
+    # persistent across epochs to avoid Windows re-spawn cost. The validation
+    # and test passes are small and run single-process, so peak worker-process
+    # memory stays bounded to the training loader's workers.
+    train_loader = _make_loader(
+        train_ds, shuffle=True, config=config, device=device, persistent=True
+    )
+    test_loader = _make_loader(
+        test_ds, shuffle=False, config=config, device=device, num_workers=0
+    )
+    val_loader: DataLoader[tuple[Tensor, int]] | None = None
+    if val_df is not None:
+        val_ds = UrbanSound8KDataset(
+            val_df, config.features, config.clip_seconds, train=False
+        )
+        val_loader = _make_loader(
+            val_ds, shuffle=False, config=config, device=device, num_workers=0
+        )
+
+    # Normalisation stats must come from clean (un-augmented) training features.
+    # When augmentation is off the train loader already yields clean features,
+    # so it is reused -- keeping the plain baseline path unchanged.
+    if augment is not None:
+        norm_ds = UrbanSound8KDataset(
+            train_df, config.features, config.clip_seconds, train=False
+        )
+        norm_loader: DataLoader[tuple[Tensor, int]] = _make_loader(
+            norm_ds, shuffle=False, config=config, device=device
+        )
+    else:
+        norm_loader = train_loader
+
+    mean, std = compute_norm_stats(norm_loader, per_band=config.norm == "per_band")
+    mean, std = mean.to(device), std.to(device)
 
     model = SmallAudioCNN(num_classes=len(class_names)).to(device)
     optimizer = torch.optim.Adam(
@@ -156,20 +284,69 @@ def train_one_fold(
         lr=config.learning_rate,
         weight_decay=config.weight_decay,
     )
+    scheduler = _build_scheduler(optimizer, schedule, config.epochs)
+
+    best_val = -1.0
+    best_state: dict[str, Tensor] | None = None
+    epochs_no_improve = 0
+    epochs_trained = 0
+    early_stopped = False
 
     for epoch in range(1, config.epochs + 1):
+        epochs_trained = epoch
         loss, _, _ = _run_epoch(
             model, train_loader, device, mean, std, optimizer=optimizer
         )
-        print(f"    fold {test_fold} epoch {epoch:>3}/{config.epochs}  loss={loss:.4f}")
+        msg = f"    fold {test_fold} epoch {epoch:>3}/{config.epochs}  loss={loss:.4f}"
+
+        val_f1: float | None = None
+        if val_loader is not None:
+            _, vt, vp = _run_epoch(model, val_loader, device, mean, std, optimizer=None)
+            val_f1 = float(classification_metrics(vt, vp, class_names)["macro_f1"])
+            msg += f"  val_f1={val_f1:.4f}"
+
+        if scheduler is not None:
+            if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                assert val_f1 is not None
+                scheduler.step(val_f1)
+            else:
+                scheduler.step()
+
+        if schedule.early_stopping:
+            assert val_f1 is not None
+            if val_f1 > best_val + schedule.min_delta:
+                best_val = val_f1
+                best_state = {
+                    k: v.detach().cpu().clone() for k, v in model.state_dict().items()
+                }
+                epochs_no_improve = 0
+            else:
+                epochs_no_improve += 1
+            print(msg)
+            if epochs_no_improve >= schedule.patience:
+                print(
+                    f"    fold {test_fold} early stop at epoch {epoch} "
+                    f"(best val_f1={best_val:.4f})"
+                )
+                early_stopped = True
+                break
+        else:
+            print(msg)
+
+    if schedule.early_stopping and best_state is not None:
+        model.load_state_dict(best_state)
 
     _, y_true, y_pred = _run_epoch(
         model, test_loader, device, mean, std, optimizer=None
     )
     metrics = classification_metrics(y_true, y_pred, class_names)
     metrics["test_fold"] = test_fold
-    metrics["norm_mean"] = mean
-    metrics["norm_std"] = std
+    metrics["norm_mean"] = mean.flatten().tolist()
+    metrics["norm_std"] = std.flatten().tolist()
+    metrics["val_fold"] = val_fold
+    metrics["best_val_macro_f1"] = best_val if schedule.early_stopping else None
+    metrics["epochs_trained"] = epochs_trained
+    metrics["early_stopped"] = early_stopped
     return metrics
 
 
@@ -238,10 +415,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     macro_f1s = [float(m["macro_f1"]) for m in fold_metrics]
     mean_f1 = sum(macro_f1s) / len(macro_f1s)
     std_f1 = (sum((f - mean_f1) ** 2 for f in macro_f1s) / len(macro_f1s)) ** 0.5
+    spread = (max(macro_f1s) - min(macro_f1s)) if macro_f1s else 0.0
+
+    regularisers: list[str] = []
+    if config.augment.enabled:
+        regularisers.append("augmentation")
+    if config.norm == "per_band":
+        regularisers.append("per-band norm")
+    if config.schedule.scheduler != "none":
+        regularisers.append(f"{config.schedule.scheduler} LR")
+    if config.schedule.early_stopping:
+        regularisers.append("early stopping")
+    reg_label = ", ".join(regularisers) if regularisers else "none (plain baseline)"
 
     summary = {
         "mean_macro_f1": mean_f1,
         "std_macro_f1": std_f1,
+        "spread_macro_f1": spread,
+        "active_regularisers": regularisers,
         "per_fold_macro_f1": {
             int(m["test_fold"]): float(m["macro_f1"]) for m in fold_metrics
         },
@@ -252,12 +443,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         json.dump(summary, fh, indent=2)
 
     print("\n" + "=" * 60)
-    print(f"Mean macro-F1 over {len(macro_f1s)} fold(s): {mean_f1:.4f} (+/- {std_f1:.4f})")
+    print(f"Active regularisers: {reg_label}")
+    print("Per-fold macro-F1:")
+    for m in fold_metrics:
+        line = f"  fold {int(m['test_fold']):>2}: {float(m['macro_f1']):.4f}"
+        if m.get("early_stopped"):
+            line += f"  (early stop @ epoch {m['epochs_trained']})"
+        print(line)
+    print(
+        f"Mean macro-F1 over {len(macro_f1s)} fold(s): {mean_f1:.4f} "
+        f"(+/- {std_f1:.4f}); per-fold spread {spread:.4f}"
+    )
     print("Published small-CNN reference band: ~0.73-0.76 macro-F1")
     if mean_f1 < 0.73:
         print(
-            "NOTE: below the published band. Before tuning, check: feature "
-            "normalisation, clip length/cropping, and fold-split integrity."
+            "NOTE: still below the published band. If normalisation, clip "
+            "length and fold-split integrity are confirmed, the next levers "
+            "(without touching the test fold) are: stronger/weaker SpecAugment, "
+            "22.05 kHz sample rate, or longer patience. Do NOT tune against the "
+            "test folds."
         )
     print(f"Results written to: {run_dir}")
     return 0

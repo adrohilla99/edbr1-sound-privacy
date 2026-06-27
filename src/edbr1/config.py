@@ -24,6 +24,10 @@ class FeatureConfig:
     64 mel bands, a 25 ms analysis window and a 10 ms hop.
     """
 
+    # 16 kHz is the default. Published UrbanSound8K baselines often use
+    # 22_050 Hz, which preserves more high-frequency detail (helpful for
+    # classes like siren and car_horn) at the cost of ~1.4x more compute per
+    # clip. Set sample_rate: 22050 in the YAML config to try it.
     sample_rate: int = 16_000
     n_mels: int = 64
     window_ms: float = 25.0
@@ -60,6 +64,68 @@ class FeatureConfig:
 
 
 @dataclass(frozen=True)
+class AugmentConfig:
+    """Training-time data augmentation parameters.
+
+    Augmentation is applied to the **training folds only** (never the held-out
+    test fold). ``enabled`` is the master switch and defaults to ``False`` so
+    the plain baseline stays reproducible; the improved config turns it on.
+
+    SpecAugment (Park et al., 2019) masks bands of the log-mel spectrogram and
+    is the cheapest, highest-value addition. The waveform-level transforms are
+    lighter: a random time shift is fast (pure torch); pitch shift and time
+    stretch are slower (they use librosa) and are off by default.
+    """
+
+    enabled: bool = False
+
+    # --- SpecAugment (applied on the (n_mels, n_frames) log-mel) ---
+    spec_augment: bool = True
+    time_masks: int = 2          # number of time masks per clip
+    time_mask_param: int = 24    # max width of each time mask (frames)
+    freq_masks: int = 2          # number of frequency masks per clip
+    freq_mask_param: int = 8     # max width of each freq mask (mel bands)
+    spec_augment_prob: float = 1.0  # prob. of applying SpecAugment to a clip
+
+    # --- waveform-level augmentation (applied before the length fix) ---
+    time_shift: bool = True
+    time_shift_ms: float = 100.0    # max absolute random shift (zero-filled)
+    pitch_shift: bool = False       # mild pitch shift; slower (librosa)
+    pitch_shift_steps: float = 2.0  # +/- semitone range
+    time_stretch: bool = False      # mild time stretch; slower (librosa)
+    time_stretch_min: float = 0.9
+    time_stretch_max: float = 1.1
+    waveform_prob: float = 0.5      # prob. of applying each waveform transform
+
+
+@dataclass(frozen=True)
+class ScheduleConfig:
+    """Learning-rate scheduling and early-stopping parameters.
+
+    When ``early_stopping`` is on (or a plateau scheduler is used) one of the
+    training folds is held out as a validation set -- carved from the training
+    folds only, never the test fold -- and the best-by-validation checkpoint is
+    restored before the held-out test fold is scored. All defaults are off so
+    the plain baseline trains for a fixed number of epochs as before.
+    """
+
+    scheduler: str = "none"     # "none" | "cosine" | "plateau"
+    early_stopping: bool = False
+    patience: int = 10          # epochs of no val-F1 improvement before stop
+    min_delta: float = 0.0      # minimum val-F1 gain counted as improvement
+    val_fold: int | None = None  # training fold held out for validation;
+    #                              None -> highest-numbered training fold
+    plateau_factor: float = 0.5  # ReduceLROnPlateau: LR multiplier on plateau
+    plateau_patience: int = 5    # ReduceLROnPlateau: epochs before reducing
+
+    def __post_init__(self) -> None:
+        if self.scheduler not in ("none", "cosine", "plateau"):
+            raise ValueError(
+                f"scheduler must be 'none', 'cosine' or 'plateau', got {self.scheduler!r}"
+            )
+
+
+@dataclass(frozen=True)
 class TrainConfig:
     """Baseline training hyper-parameters and bookkeeping."""
 
@@ -75,7 +141,17 @@ class TrainConfig:
     # Per-sample fixed clip length in seconds for batching (UrbanSound8K
     # clips are <= 4 s); shorter clips are zero-padded, longer ones cropped.
     clip_seconds: float = 4.0
+    # Feature normalisation: "global" (single scalar mean/std, the original
+    # baseline) or "per_band" (a mean/std per mel band). Either way the stats
+    # are estimated on the TRAINING folds only -- never the test fold.
+    norm: str = "global"
     features: FeatureConfig = field(default_factory=FeatureConfig)
+    augment: AugmentConfig = field(default_factory=AugmentConfig)
+    schedule: ScheduleConfig = field(default_factory=ScheduleConfig)
+
+    def __post_init__(self) -> None:
+        if self.norm not in ("global", "per_band"):
+            raise ValueError(f"norm must be 'global' or 'per_band', got {self.norm!r}")
 
 
 def _filter_known(cls: type, data: dict[str, Any]) -> dict[str, Any]:
@@ -91,13 +167,28 @@ def feature_config_from_dict(data: dict[str, Any]) -> FeatureConfig:
     return FeatureConfig(**_filter_known(FeatureConfig, data))
 
 
+def augment_config_from_dict(data: dict[str, Any]) -> AugmentConfig:
+    return AugmentConfig(**_filter_known(AugmentConfig, data))
+
+
+def schedule_config_from_dict(data: dict[str, Any]) -> ScheduleConfig:
+    return ScheduleConfig(**_filter_known(ScheduleConfig, data))
+
+
 def train_config_from_dict(data: dict[str, Any]) -> TrainConfig:
     data = dict(data)
-    feats = data.pop("features", {})
+    feats = data.pop("features", {}) or {}
+    aug = data.pop("augment", {}) or {}
+    sched = data.pop("schedule", {}) or {}
     if "test_folds" in data and data["test_folds"] is not None:
         data["test_folds"] = tuple(data["test_folds"])
     kwargs = _filter_known(TrainConfig, data)
-    return TrainConfig(features=feature_config_from_dict(feats), **kwargs)
+    return TrainConfig(
+        features=feature_config_from_dict(feats),
+        augment=augment_config_from_dict(aug),
+        schedule=schedule_config_from_dict(sched),
+        **kwargs,
+    )
 
 
 def load_train_config(path: str | Path) -> TrainConfig:

@@ -22,7 +22,8 @@ import torch
 from torch import Tensor
 from torch.utils.data import Dataset
 
-from edbr1.config import FeatureConfig
+from edbr1.config import AugmentConfig, FeatureConfig
+from edbr1.data.augment import augment_waveform, spec_augment
 from edbr1.features.melspec import LogMelExtractor
 
 # Class names indexed by classID (0..9), per the official dataset taxonomy.
@@ -100,6 +101,37 @@ def train_test_fold_split(
     return train_df.reset_index(drop=True), test_df.reset_index(drop=True)
 
 
+def carve_validation_fold(
+    train_df: pd.DataFrame, val_fold: int
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Carve a validation set out of an already train-only frame, by ``fold``.
+
+    Used for early stopping: ``train_df`` must already exclude the held-out
+    test fold (it is the output of :func:`train_test_fold_split`). One of its
+    remaining folds becomes the validation set; the rest stay for training.
+
+    Includes a leak guard mirroring :func:`train_test_fold_split`: the two
+    partitions share no fold, and the validation partition holds exactly
+    ``val_fold``. Estimating normalisation and stopping on this fold therefore
+    never touches the test fold.
+    """
+    folds = set(train_df["fold"].unique())
+    if val_fold not in folds:
+        raise ValueError(
+            f"val_fold {val_fold} is not among the training folds {sorted(folds)} "
+            "(it must not be the held-out test fold)"
+        )
+
+    val_df = train_df[train_df["fold"] == val_fold]
+    inner_df = train_df[train_df["fold"] != val_fold]
+
+    inner_folds = set(inner_df["fold"].unique())
+    if val_fold in inner_folds:
+        raise AssertionError(f"Validation fold {val_fold} leaked into inner-train")
+
+    return inner_df.reset_index(drop=True), val_df.reset_index(drop=True)
+
+
 @dataclass
 class UrbanSound8K:
     """Handle to an extracted UrbanSound8K tree plus its metadata."""
@@ -127,6 +159,11 @@ class UrbanSound8KDataset(Dataset[tuple[Tensor, int]]):
     mono, resampled to the configured rate, and fixed to
     ``clip_seconds`` (pad short, centre-independent crop long) so a batch
     has uniform shape.
+
+    Augmentation is gated by ``train``: it is applied only when the dataset is
+    built with ``train=True`` *and* an enabled :class:`AugmentConfig`. The
+    held-out test fold must always be built with ``train=False`` so its clips
+    are never augmented.
     """
 
     def __init__(
@@ -134,11 +171,18 @@ class UrbanSound8KDataset(Dataset[tuple[Tensor, int]]):
         metadata: pd.DataFrame,
         feature_config: FeatureConfig | None = None,
         clip_seconds: float = 4.0,
+        *,
+        train: bool = False,
+        augment: AugmentConfig | None = None,
     ) -> None:
         self.metadata = metadata.reset_index(drop=True)
         self.config = feature_config or FeatureConfig()
         self.extractor = LogMelExtractor(self.config)
         self.target_len = int(round(clip_seconds * self.config.sample_rate))
+        self.train = train
+        self.augment = augment
+        # Augmentation is on only for training data with an enabled config.
+        self.augment_on = bool(train and augment is not None and augment.enabled)
 
     def __len__(self) -> int:
         return len(self.metadata)
@@ -169,7 +213,17 @@ class UrbanSound8KDataset(Dataset[tuple[Tensor, int]]):
         mono = wav.mean(dim=0)
         if sr != self.config.sample_rate:
             mono = AF.resample(mono, sr, self.config.sample_rate)
+
+        # Waveform-level augmentation runs before the length fix so a
+        # length-changing time stretch is re-normalised to target_len.
+        if self.augment_on:
+            assert self.augment is not None
+            mono = augment_waveform(mono, self.config.sample_rate, self.augment)
+
         mono = self._fix_length(mono)
 
         log_mel = self.extractor(mono, self.config.sample_rate)  # (n_mels, frames)
+        if self.augment_on:
+            assert self.augment is not None
+            log_mel = spec_augment(log_mel, self.augment)
         return log_mel.unsqueeze(0), int(row["classID"])
