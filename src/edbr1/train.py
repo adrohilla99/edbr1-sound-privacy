@@ -37,6 +37,7 @@ from torch import Tensor, nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
+from edbr1 import bitrate
 from edbr1.config import ScheduleConfig, TrainConfig, config_to_dict, load_train_config
 from edbr1.data.urbansound8k import (
     URBANSOUND8K_CLASSES,
@@ -46,7 +47,8 @@ from edbr1.data.urbansound8k import (
     train_test_fold_split,
 )
 from edbr1.evaluate import classification_metrics, save_confusion_matrix
-from edbr1.models import SmallAudioCNN
+from edbr1.models import EncoderClassifier, build_model
+from edbr1.models.bottleneck import BottleneckOutput
 from edbr1.utils import seed_everything, seed_worker
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -140,6 +142,40 @@ def compute_norm_stats(
     )
 
 
+def _forward_model(model: nn.Module, x: Tensor) -> tuple[Tensor, BottleneckOutput]:
+    """Call ``model`` and return ``(logits, bottleneck_output)`` uniformly.
+
+    ``EncoderClassifier`` already returns that tuple. The legacy ``SmallAudioCNN``
+    returns bare logits; those are wrapped in a zero-loss identity output so the
+    training loop is identical for both (``ce + 0`` leaves the baseline path
+    numerically unchanged).
+    """
+    out = model(x)
+    if isinstance(out, tuple):
+        logits, bottleneck = out
+        return logits, bottleneck
+    return out, BottleneckOutput(
+        latent=out, loss=out.new_zeros(()), indices=None, perplexity=None, codebook_size=0
+    )
+
+
+def _codebook_size(model: nn.Module) -> int:
+    """Codebook size of the model's bottleneck (0 if it has none)."""
+    bottleneck = getattr(model, "bottleneck", None)
+    return int(getattr(bottleneck, "codebook_size", 0))
+
+
+@dataclasses.dataclass
+class EpochResult:
+    """Outcome of one epoch/eval pass."""
+
+    ce_loss: float          # mean cross-entropy (comparable to the old baseline)
+    vq_loss: float          # mean auxiliary VQ loss (0 without a VQ bottleneck)
+    y_true: list[int]
+    y_pred: list[int]
+    code_counts: Tensor | None  # (K,) accumulated code usage, or None
+
+
 def _run_epoch(
     model: nn.Module,
     loader: DataLoader[tuple[Tensor, int]],
@@ -148,16 +184,26 @@ def _run_epoch(
     std: Tensor,
     *,
     optimizer: torch.optim.Optimizer | None,
-) -> tuple[float, list[int], list[int]]:
-    """One pass. Train if ``optimizer`` is given, else evaluate. Returns
-    (mean_loss, y_true, y_pred)."""
+) -> EpochResult:
+    """One pass. Train if ``optimizer`` is given, else evaluate.
+
+    The optimised loss is ``cross_entropy + bottleneck.loss`` (the VQ codebook +
+    commitment loss); ``bottleneck.loss`` is a zero scalar for the no-bottleneck
+    control and the legacy CNN, so the baseline path is unchanged. Code usage is
+    accumulated into a ``(K,)`` histogram when a VQ bottleneck is present.
+    """
     training = optimizer is not None
     model.train(training)
     criterion = nn.CrossEntropyLoss()
-    running_loss = 0.0
+    running_ce = 0.0
+    running_vq = 0.0
     seen = 0
     y_true: list[int] = []
     y_pred: list[int] = []
+    codebook_size = _codebook_size(model)
+    code_counts = (
+        torch.zeros(codebook_size, dtype=torch.long) if codebook_size > 0 else None
+    )
 
     with torch.set_grad_enabled(training):
         for x, y in loader:
@@ -166,19 +212,25 @@ def _run_epoch(
             if training:
                 assert optimizer is not None
                 optimizer.zero_grad()
-            logits = model(x)
-            loss = criterion(logits, y)
+            logits, bottleneck = _forward_model(model, x)
+            ce = criterion(logits, y)
+            loss = ce + bottleneck.loss
             if training:
                 loss.backward()
                 assert optimizer is not None
                 optimizer.step()
-            running_loss += float(loss.detach()) * y.size(0)
+            running_ce += float(ce.detach()) * y.size(0)
+            running_vq += float(bottleneck.loss.detach()) * y.size(0)
             seen += y.size(0)
             preds = logits.argmax(dim=1)
             y_true.extend(y.tolist())
             y_pred.extend(preds.tolist())
+            if code_counts is not None and bottleneck.indices is not None:
+                idx = bottleneck.indices.reshape(-1).to("cpu")
+                code_counts += torch.bincount(idx, minlength=codebook_size)
 
-    return running_loss / max(seen, 1), y_true, y_pred
+    denom = max(seen, 1)
+    return EpochResult(running_ce / denom, running_vq / denom, y_true, y_pred, code_counts)
 
 
 def _build_scheduler(
@@ -278,7 +330,7 @@ def train_one_fold(
     mean, std = compute_norm_stats(norm_loader, per_band=config.norm == "per_band")
     mean, std = mean.to(device), std.to(device)
 
-    model = SmallAudioCNN(num_classes=len(class_names)).to(device)
+    model = build_model(config, num_classes=len(class_names)).to(device)
     optimizer = torch.optim.Adam(
         model.parameters(),
         lr=config.learning_rate,
@@ -294,15 +346,22 @@ def train_one_fold(
 
     for epoch in range(1, config.epochs + 1):
         epochs_trained = epoch
-        loss, _, _ = _run_epoch(
+        train_res = _run_epoch(
             model, train_loader, device, mean, std, optimizer=optimizer
         )
-        msg = f"    fold {test_fold} epoch {epoch:>3}/{config.epochs}  loss={loss:.4f}"
+        msg = (
+            f"    fold {test_fold} epoch {epoch:>3}/{config.epochs}  "
+            f"loss={train_res.ce_loss:.4f}"
+        )
+        if train_res.vq_loss:
+            msg += f" vq={train_res.vq_loss:.4f}"
 
         val_f1: float | None = None
         if val_loader is not None:
-            _, vt, vp = _run_epoch(model, val_loader, device, mean, std, optimizer=None)
-            val_f1 = float(classification_metrics(vt, vp, class_names)["macro_f1"])
+            val_res = _run_epoch(model, val_loader, device, mean, std, optimizer=None)
+            val_f1 = float(
+                classification_metrics(val_res.y_true, val_res.y_pred, class_names)["macro_f1"]
+            )
             msg += f"  val_f1={val_f1:.4f}"
 
         if scheduler is not None:
@@ -336,10 +395,8 @@ def train_one_fold(
     if schedule.early_stopping and best_state is not None:
         model.load_state_dict(best_state)
 
-    _, y_true, y_pred = _run_epoch(
-        model, test_loader, device, mean, std, optimizer=None
-    )
-    metrics = classification_metrics(y_true, y_pred, class_names)
+    test_res = _run_epoch(model, test_loader, device, mean, std, optimizer=None)
+    metrics = classification_metrics(test_res.y_true, test_res.y_pred, class_names)
     metrics["test_fold"] = test_fold
     metrics["norm_mean"] = mean.flatten().tolist()
     metrics["norm_std"] = std.flatten().tolist()
@@ -347,7 +404,225 @@ def train_one_fold(
     metrics["best_val_macro_f1"] = best_val if schedule.early_stopping else None
     metrics["epochs_trained"] = epochs_trained
     metrics["early_stopped"] = early_stopped
+    metrics.update(_bottleneck_metrics(config, test_res.code_counts))
     return metrics
+
+
+def _bottleneck_metrics(
+    config: TrainConfig, code_counts: Tensor | None
+) -> dict[str, Any]:
+    """Bitrate accounting and codebook-usage stats for a VQ fold (empty if none).
+
+    Bitrate is computed honestly from the *declared* latent grid and codebook
+    size (``bits_per_second = tokens_per_second * log2(codebook_size)``).
+    Perplexity and the fraction of codes used come from the code-usage histogram
+    accumulated over the held-out test fold, so codebook collapse is reported as
+    measured -- never massaged.
+    """
+    if config.model != "encoder_classifier" or config.bottleneck.type != "vq":
+        return {}
+    codebook_size = config.bottleneck.codebook_size
+    tokens_per_clip = config.encoder.tokens_per_clip()
+    tps = bitrate.tokens_per_second(tokens_per_clip, config.clip_seconds)
+    out: dict[str, Any] = {
+        "codebook_size": codebook_size,
+        "tokens_per_clip": tokens_per_clip,
+        "tokens_per_second": tps,
+        "bits_per_token": bitrate.bits_per_token(codebook_size),
+        "bits_per_second": bitrate.bits_per_second(tps, codebook_size),
+    }
+    if code_counts is not None:
+        counts = code_counts.to(torch.float64)
+        total = float(counts.sum())
+        used = int((counts > 0).sum())
+        probs = counts / max(total, 1.0)
+        nz = probs[probs > 0]
+        perplexity = float(torch.exp(-(nz * nz.log()).sum())) if nz.numel() else 0.0
+        out["codebook_perplexity"] = perplexity
+        out["codebook_used"] = used
+        out["codebook_fraction_used"] = used / codebook_size
+    return out
+
+
+def _operating_point(config: TrainConfig) -> dict[str, float | int]:
+    """Resolved bitrate operating point for a VQ config (see edbr1.bitrate)."""
+    return bitrate.OperatingPoint(
+        latent_freq=config.encoder.latent_freq,
+        latent_frames=config.encoder.latent_frames,
+        codebook_size=config.bottleneck.codebook_size,
+        clip_seconds=config.clip_seconds,
+    ).as_dict()
+
+
+def _run_prefix(config: TrainConfig) -> str:
+    """Timestamped-run directory prefix reflecting the model/bottleneck."""
+    if config.model != "encoder_classifier":
+        return "us8k_baseline"
+    if config.bottleneck.type == "vq":
+        return "us8k_vq"
+    return "us8k_encoder"
+
+
+def _mean_std(values: list[float]) -> tuple[float, float]:
+    if not values:
+        return 0.0, 0.0
+    mean = sum(values) / len(values)
+    std = (sum((v - mean) ** 2 for v in values) / len(values)) ** 0.5
+    return mean, std
+
+
+def _summarise_bottleneck(
+    config: TrainConfig, fold_metrics: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Run-level bitrate + codebook-usage summary for a VQ run (empty if none)."""
+    if config.model != "encoder_classifier" or config.bottleneck.type != "vq":
+        return {}
+    op = _operating_point(config)
+    ppl_mean, ppl_std = _mean_std(
+        [float(m["codebook_perplexity"]) for m in fold_metrics if "codebook_perplexity" in m]
+    )
+    frac_mean, frac_std = _mean_std(
+        [
+            float(m["codebook_fraction_used"])
+            for m in fold_metrics
+            if "codebook_fraction_used" in m
+        ]
+    )
+    return {
+        **op,
+        "codebook_perplexity_mean": ppl_mean,
+        "codebook_perplexity_std": ppl_std,
+        "codebook_fraction_used_mean": frac_mean,
+        "codebook_fraction_used_std": frac_std,
+    }
+
+
+def run_training(
+    config: TrainConfig,
+    *,
+    root: Path,
+    results_dir: Path,
+    device: torch.device,
+    test_folds: Sequence[int] | None = None,
+) -> dict[str, Any]:
+    """Run the CV protocol for ``config``, write its artifact dir, return the summary.
+
+    The returned dict is exactly what is written to ``results.json`` plus a
+    ``run_dir`` key pointing at the timestamped artifact directory. Shared by the
+    CLI (:func:`main`) and the bitrate sweep runner so both produce identical
+    per-run artifacts.
+    """
+    folds = tuple(test_folds) if test_folds else config.test_folds
+    metadata = load_metadata(root)
+    class_names = URBANSOUND8K_CLASSES
+
+    run_dir = results_dir / time.strftime(f"{_run_prefix(config)}_%Y%m%d_%H%M%S")
+    run_dir.mkdir(parents=True, exist_ok=True)
+    with (run_dir / "config.yaml").open("w", encoding="utf-8") as fh:
+        yaml.safe_dump(config_to_dict(config), fh, sort_keys=False)
+
+    probe_model = build_model(config, num_classes=len(class_names))
+    print(f"Device: {device}")
+    print(f"Model params: {sum(p.numel() for p in probe_model.parameters()):,}")
+    if isinstance(probe_model, EncoderClassifier):
+        print(f"Encoder params (E, on-device): {probe_model.encoder_parameters():,}")
+    if config.model == "encoder_classifier" and config.bottleneck.type == "vq":
+        op = _operating_point(config)
+        print(
+            f"VQ operating point: {op['tokens_per_second']:.1f} tokens/s x "
+            f"{op['bits_per_token']:.1f} bits/token = {op['bits_per_second']:.0f} bits/s "
+            f"(codebook {config.bottleneck.codebook_size}, "
+            f"grid {config.encoder.latent_freq}x{config.encoder.latent_frames})"
+        )
+    print(f"Evaluating folds: {folds}")
+
+    fold_metrics: list[dict[str, Any]] = []
+    for test_fold in folds:
+        print(f"\n=== Fold {test_fold} ===")
+        metrics = train_one_fold(metadata, test_fold, config, device, class_names)
+        fold_metrics.append(metrics)
+        print(f"  fold {test_fold} macro-F1 = {metrics['macro_f1']:.4f}")
+        save_confusion_matrix(
+            metrics["confusion_matrix"],
+            class_names,
+            run_dir / f"confusion_fold{test_fold}.png",
+            title=f"UrbanSound8K fold {test_fold}",
+        )
+
+    macro_f1s = [float(m["macro_f1"]) for m in fold_metrics]
+    mean_f1 = sum(macro_f1s) / len(macro_f1s)
+    std_f1 = (sum((f - mean_f1) ** 2 for f in macro_f1s) / len(macro_f1s)) ** 0.5
+    spread = (max(macro_f1s) - min(macro_f1s)) if macro_f1s else 0.0
+
+    regularisers: list[str] = []
+    if config.augment.enabled:
+        regularisers.append("augmentation")
+    if config.norm == "per_band":
+        regularisers.append("per-band norm")
+    if config.schedule.scheduler != "none":
+        regularisers.append(f"{config.schedule.scheduler} LR")
+    if config.schedule.early_stopping:
+        regularisers.append("early stopping")
+    reg_label = ", ".join(regularisers) if regularisers else "none (plain baseline)"
+
+    summary: dict[str, Any] = {
+        "mean_macro_f1": mean_f1,
+        "std_macro_f1": std_f1,
+        "spread_macro_f1": spread,
+        "active_regularisers": regularisers,
+        "per_fold_macro_f1": {
+            int(m["test_fold"]): float(m["macro_f1"]) for m in fold_metrics
+        },
+        "folds": fold_metrics,
+        "config": config_to_dict(config),
+    }
+    bottleneck_summary = _summarise_bottleneck(config, fold_metrics)
+    if bottleneck_summary:
+        summary["bottleneck"] = bottleneck_summary
+    with (run_dir / "results.json").open("w", encoding="utf-8") as fh:
+        json.dump(summary, fh, indent=2)
+
+    print("\n" + "=" * 60)
+    print(f"Active regularisers: {reg_label}")
+    print("Per-fold macro-F1:")
+    for m in fold_metrics:
+        line = f"  fold {int(m['test_fold']):>2}: {float(m['macro_f1']):.4f}"
+        if m.get("early_stopped"):
+            line += f"  (early stop @ epoch {m['epochs_trained']})"
+        print(line)
+    print(
+        f"Mean macro-F1 over {len(macro_f1s)} fold(s): {mean_f1:.4f} "
+        f"(+/- {std_f1:.4f}); per-fold spread {spread:.4f}"
+    )
+    if bottleneck_summary:
+        print(
+            f"VQ bitrate: {bottleneck_summary['bits_per_second']:.0f} bits/s "
+            f"({bottleneck_summary['tokens_per_second']:.1f} tokens/s x "
+            f"{bottleneck_summary['bits_per_token']:.1f} bits/token)"
+        )
+        print(
+            "Codebook usage: perplexity "
+            f"{bottleneck_summary['codebook_perplexity_mean']:.1f}"
+            f" (+/- {bottleneck_summary['codebook_perplexity_std']:.1f}) of "
+            f"{bottleneck_summary['codebook_size']}; fraction used "
+            f"{bottleneck_summary['codebook_fraction_used_mean']:.3f}"
+        )
+    print("Published small-CNN reference band: ~0.73-0.76 macro-F1")
+    # The below-band advice targets the un-bottlenecked baseline/control. Under a
+    # VQ bottleneck a sub-band score can be the honest cost of a low bitrate, not
+    # a tuning failure, so the note is suppressed there.
+    is_vq = config.model == "encoder_classifier" and config.bottleneck.type == "vq"
+    if mean_f1 < 0.73 and not is_vq:
+        print(
+            "NOTE: still below the published band. If normalisation, clip "
+            "length and fold-split integrity are confirmed, the next levers "
+            "(without touching the test fold) are: stronger/weaker SpecAugment, "
+            "22.05 kHz sample rate, or longer patience. Do NOT tune against the "
+            "test folds."
+        )
+    print(f"Results written to: {run_dir}")
+    summary["run_dir"] = str(run_dir)
+    return summary
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -384,86 +659,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     config = load_train_config(args.config)
     if args.epochs is not None:
         config = dataclasses.replace(config, epochs=args.epochs)
-    test_folds = tuple(args.test_folds) if args.test_folds else config.test_folds
 
     device = _pick_device(args.device)
-    metadata = load_metadata(args.root)
-    class_names = URBANSOUND8K_CLASSES
-
-    run_dir = args.results_dir / time.strftime("us8k_baseline_%Y%m%d_%H%M%S")
-    run_dir.mkdir(parents=True, exist_ok=True)
-    with (run_dir / "config.yaml").open("w", encoding="utf-8") as fh:
-        yaml.safe_dump(config_to_dict(config), fh, sort_keys=False)
-
-    print(f"Device: {device}")
-    print(f"Model params: {SmallAudioCNN(num_classes=len(class_names)).num_parameters():,}")
-    print(f"Evaluating folds: {test_folds}")
-
-    fold_metrics: list[dict[str, Any]] = []
-    for test_fold in test_folds:
-        print(f"\n=== Fold {test_fold} ===")
-        metrics = train_one_fold(metadata, test_fold, config, device, class_names)
-        fold_metrics.append(metrics)
-        print(f"  fold {test_fold} macro-F1 = {metrics['macro_f1']:.4f}")
-        save_confusion_matrix(
-            metrics["confusion_matrix"],
-            class_names,
-            run_dir / f"confusion_fold{test_fold}.png",
-            title=f"UrbanSound8K fold {test_fold}",
-        )
-
-    macro_f1s = [float(m["macro_f1"]) for m in fold_metrics]
-    mean_f1 = sum(macro_f1s) / len(macro_f1s)
-    std_f1 = (sum((f - mean_f1) ** 2 for f in macro_f1s) / len(macro_f1s)) ** 0.5
-    spread = (max(macro_f1s) - min(macro_f1s)) if macro_f1s else 0.0
-
-    regularisers: list[str] = []
-    if config.augment.enabled:
-        regularisers.append("augmentation")
-    if config.norm == "per_band":
-        regularisers.append("per-band norm")
-    if config.schedule.scheduler != "none":
-        regularisers.append(f"{config.schedule.scheduler} LR")
-    if config.schedule.early_stopping:
-        regularisers.append("early stopping")
-    reg_label = ", ".join(regularisers) if regularisers else "none (plain baseline)"
-
-    summary = {
-        "mean_macro_f1": mean_f1,
-        "std_macro_f1": std_f1,
-        "spread_macro_f1": spread,
-        "active_regularisers": regularisers,
-        "per_fold_macro_f1": {
-            int(m["test_fold"]): float(m["macro_f1"]) for m in fold_metrics
-        },
-        "folds": fold_metrics,
-        "config": config_to_dict(config),
-    }
-    with (run_dir / "results.json").open("w", encoding="utf-8") as fh:
-        json.dump(summary, fh, indent=2)
-
-    print("\n" + "=" * 60)
-    print(f"Active regularisers: {reg_label}")
-    print("Per-fold macro-F1:")
-    for m in fold_metrics:
-        line = f"  fold {int(m['test_fold']):>2}: {float(m['macro_f1']):.4f}"
-        if m.get("early_stopped"):
-            line += f"  (early stop @ epoch {m['epochs_trained']})"
-        print(line)
-    print(
-        f"Mean macro-F1 over {len(macro_f1s)} fold(s): {mean_f1:.4f} "
-        f"(+/- {std_f1:.4f}); per-fold spread {spread:.4f}"
+    run_training(
+        config,
+        root=args.root,
+        results_dir=args.results_dir,
+        device=device,
+        test_folds=args.test_folds,
     )
-    print("Published small-CNN reference band: ~0.73-0.76 macro-F1")
-    if mean_f1 < 0.73:
-        print(
-            "NOTE: still below the published band. If normalisation, clip "
-            "length and fold-split integrity are confirmed, the next levers "
-            "(without touching the test fold) are: stronger/weaker SpecAugment, "
-            "22.05 kHz sample rate, or longer patience. Do NOT tune against the "
-            "test folds."
-        )
-    print(f"Results written to: {run_dir}")
     return 0
 
 

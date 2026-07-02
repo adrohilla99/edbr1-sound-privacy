@@ -98,3 +98,63 @@ def test_invalid_norm_and_scheduler_rejected():
 
     with pytest.raises(ValueError, match="scheduler must be"):
         ScheduleConfig(scheduler="bogus")
+
+
+# --- Encoder / bottleneck configs (Day 4 refactor) -------------------------
+
+
+def test_default_train_config_is_legacy_cnn():
+    # Legacy default: the original CNN with a no-op bottleneck section present.
+    cfg = TrainConfig()
+    assert cfg.model == "cnn"
+    assert cfg.bottleneck.type == "none"
+
+
+def test_encoder_control_config_round_trips():
+    import yaml
+
+    cfg = load_train_config(CONFIGS / "encoder_nobottleneck.yaml")
+    assert cfg.model == "encoder_classifier"
+    assert cfg.bottleneck.type == "none"
+    # The control carries the canonical regularisation recipe (must reach ~0.746).
+    assert cfg.norm == "per_band"
+    assert cfg.augment.enabled is True
+    assert cfg.schedule.scheduler == "cosine"
+    assert cfg.features.sample_rate == 16_000
+    dumped = yaml.safe_dump(config_to_dict(cfg))
+    assert "encoder" in dumped and "bottleneck" in dumped
+
+
+def test_vq_operating_point_configs_span_target_bitrates():
+    from edbr1.bitrate import OperatingPoint
+
+    expected = {
+        "vq/vq_00080bps.yaml": 80.0,
+        "vq/vq_00250bps.yaml": 250.0,
+        "vq/vq_01000bps.yaml": 1000.0,
+        "vq/vq_02000bps.yaml": 2000.0,
+        "vq/vq_04000bps.yaml": 4000.0,
+        "vq/vq_16000bps.yaml": 16000.0,
+    }
+    for name, bps in expected.items():
+        cfg = load_train_config(CONFIGS / name)
+        assert cfg.model == "encoder_classifier"
+        assert cfg.bottleneck.type == "vq"
+        op = OperatingPoint(
+            latent_freq=cfg.encoder.latent_freq,
+            latent_frames=cfg.encoder.latent_frames,
+            codebook_size=cfg.bottleneck.codebook_size,
+            clip_seconds=cfg.clip_seconds,
+        )
+        assert op.bits_per_second == pytest.approx(bps), name
+
+
+def test_invalid_model_and_bottleneck_rejected():
+    from edbr1.config import BottleneckConfig
+
+    with pytest.raises(ValueError, match="model must be"):
+        TrainConfig(model="bogus")
+    with pytest.raises(ValueError, match="bottleneck type must be"):
+        BottleneckConfig(type="bogus")
+    with pytest.raises(ValueError, match="codebook_size must be"):
+        BottleneckConfig(type="vq", codebook_size=0)

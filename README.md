@@ -62,7 +62,21 @@ python -m edbr1.train \
     --config configs/baseline.yaml
 #    Quick smoke (2 folds, 1 epoch):
 python -m edbr1.train --epochs 1 --test-folds 1 2
+
+# 4. VQ utility-vs-bitrate sweep: the encoder->classifier control plus six
+#    discrete-bottleneck operating points (~80 bits/s .. ~16 kbits/s), each
+#    under the full 10-fold CV. Writes sweep.{json,csv} + bitrate_curve.png.
+python scripts/run_bitrate_sweep.py \
+    --root data/raw/urbansound8k/UrbanSound8K
 ```
+
+The encoder->classifier model (`model: encoder_classifier`) splits the network
+into an on-device depthwise-separable encoder E (< 500K params) that emits a
+latent token grid, an optional VQ-VAE bottleneck B (codebook + straight-through
+estimator + commitment loss), and a downstream classifier C. Bitrate is logged
+honestly as `tokens_per_second * log2(codebook_size)`; codebook perplexity and
+the fraction of codes used are reported per fold so codebook collapse at low
+bitrate is surfaced rather than hidden.
 
 Feature parameters (16 kHz, 64 mel bands, 25 ms window, 10 ms hop) and
 training hyper-parameters are config-driven via `configs/` — see
@@ -79,7 +93,11 @@ training hyper-parameters are config-driven via `configs/` — see
 ├── TODO.md
 ├── configs/                  # feature + training configs (YAML)
 │   ├── features.yaml
-│   └── baseline.yaml
+│   ├── baseline.yaml         # plain CNN baseline
+│   ├── baseline_final.yaml   # canonical regularised CNN baseline (0.746)
+│   ├── improved_22k.yaml     # rejected 22.05 kHz lever (kept as evidence)
+│   ├── encoder_nobottleneck.yaml  # encoder->classifier control (no VQ)
+│   └── vq/                   # VQ bitrate operating points (one per point)
 ├── docs/
 │   ├── 00_project_brief.md
 │   ├── 01_research_questions.md
@@ -97,22 +115,27 @@ training hyper-parameters are config-driven via `configs/` — see
 │   ├── download_librispeech.py
 │   ├── download_esc50.py
 │   ├── plot_spectrograms.py  # fold-1 sanity check
+│   ├── run_bitrate_sweep.py  # VQ utility-vs-bitrate sweep + trade-off curve
 │   └── verify_environment.py
 ├── src/
 │   └── edbr1/
 │       ├── __init__.py
-│       ├── config.py         # FeatureConfig / TrainConfig
+│       ├── config.py         # Feature/Train/Encoder/Bottleneck configs
+│       ├── bitrate.py        # honest bits/second accounting for the VQ bottleneck
 │       ├── data/             # UrbanSound8K loader + fold split
 │       ├── features/         # log-mel extractor
-│       ├── models/           # compact CNN
+│       ├── models/           # CNN baseline + encoder / VQ bottleneck / classifier
 │       ├── utils/            # seeding
 │       ├── evaluate.py       # macro-F1, per-class F1, confusion matrix
-│       └── train.py          # 10-fold CV entry point
+│       └── train.py          # 10-fold CV entry point (run_training)
 ├── tests/
 │   ├── test_smoke.py
 │   ├── test_config.py
 │   ├── test_splits.py
-│   └── test_features.py
+│   ├── test_features.py
+│   ├── test_augment_norm.py
+│   ├── test_bitrate.py
+│   └── test_bottleneck.py
 └── notebooks/
 ```
 

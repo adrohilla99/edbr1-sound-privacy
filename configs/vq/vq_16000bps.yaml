@@ -1,0 +1,77 @@
+# VQ bitrate operating point -- 16000 bits/s (point 6/6 of the sweep).
+#
+# Discrete VQ-VAE bottleneck between the on-device encoder E and classifier C.
+# Identical to configs/encoder_nobottleneck.yaml (same canonical recipe: 16 kHz,
+# per-band norm, SpecAugment + time-shift, cosine LR, early stopping) EXCEPT the
+# bottleneck, which quantises the 32x200 latent grid (6400 tokens/clip) with a
+# 1024-entry codebook. Honest bitrate:
+#   tokens/s = 32 * 200 / 4 s   = 1600
+#   bits/tok = log2(1024)                  = 10
+#   bits/s   = tokens/s * bits/tok        = 16000
+# Codebook usage (perplexity, fraction of codes used) is logged per fold: at the
+# low-bitrate end the codebook is expected to collapse, which is reported as-is.
+# Only the latent grid (token rate) varies across the sweep; the codebook size is
+# held at 1024 so usage is comparable across operating points.
+seed: 1337
+batch_size: 32
+epochs: 80
+learning_rate: 0.001
+weight_decay: 0.0001
+num_workers: 8
+clip_seconds: 4
+norm: per_band
+model: encoder_classifier
+test_folds: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+
+features:
+  sample_rate: 16000
+  n_mels: 64
+  window_ms: 25.0
+  hop_ms: 10.0
+  f_min: 0.0
+  f_max: null
+  n_fft: null
+  power: 2.0
+  top_db: 80.0
+
+encoder:
+  base_channels: 32
+  latent_dim: 128         # codebook vector dimension D
+  latent_freq: 32
+  latent_frames: 200
+  min_depth: 3
+  dropout: 0.3
+
+bottleneck:
+  type: vq
+  codebook_size: 1024
+  commitment_beta: 0.25
+  ema: false              # plain loss-based VQ; collapse at low bitrate is a finding
+  ema_decay: 0.99
+  ema_epsilon: 1.0e-5
+
+augment:
+  enabled: true
+  spec_augment: true
+  time_masks: 2
+  time_mask_param: 24
+  freq_masks: 2
+  freq_mask_param: 8
+  spec_augment_prob: 1.0
+  time_shift: true
+  time_shift_ms: 100.0
+  pitch_shift: false
+  pitch_shift_steps: 2.0
+  time_stretch: false
+  time_stretch_min: 0.9
+  time_stretch_max: 1.1
+  waveform_prob: 0.5
+
+schedule:
+  scheduler: cosine
+  early_stopping: true
+  patience: 12
+  min_delta: 0.0
+  val_fold: null
+  plateau_factor: 0.5
+  plateau_patience: 5

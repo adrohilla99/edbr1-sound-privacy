@@ -1,0 +1,72 @@
+# Encoder -> classifier CONTROL (no bottleneck) -- the refactor's reference.
+#
+# This is the "no-bottleneck" control for the VQ bitrate sweep: the depthwise-
+# separable on-device encoder E feeds the classifier C directly (bottleneck
+# type: none, i.e. the continuous latent passes straight through). It carries
+# the SAME regularisation recipe as the canonical baseline (configs/
+# baseline_final.yaml) so it must land at ~0.746 +/- 0.050 macro-F1 over the
+# official 10-fold CV. If it does not, the refactor moved the number and that
+# is a bug to fix before trusting the swept operating points -- not a result.
+#
+# The only difference vs baseline_final.yaml is the model: an explicit
+# encoder + classifier (model: encoder_classifier) instead of the monolithic
+# SmallAudioCNN. The encoder pools to a generous 8x50 latent grid that the
+# classifier global-average-pools, so no information is bottlenecked here.
+seed: 1337
+batch_size: 64
+epochs: 80                # upper bound; early stopping usually halts sooner
+learning_rate: 0.001
+weight_decay: 0.0001
+num_workers: 8
+clip_seconds: 4.0
+norm: per_band
+model: encoder_classifier
+test_folds: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+
+features:
+  sample_rate: 16000      # canonical (see RESULTS.md)
+  n_mels: 64
+  window_ms: 25.0
+  hop_ms: 10.0
+  f_min: 0.0
+  f_max: null
+  n_fft: null
+  power: 2.0
+  top_db: 80.0
+
+encoder:
+  base_channels: 32
+  latent_dim: 128         # codebook vector dim in the VQ configs; here just width
+  latent_freq: 8          # generous latent grid -> effectively no bottleneck
+  latent_frames: 50
+  min_depth: 3
+  dropout: 0.3
+
+bottleneck:
+  type: none              # CONTROL: continuous latent, no quantisation, no VQ loss
+
+augment:
+  enabled: true
+  spec_augment: true
+  time_masks: 2
+  time_mask_param: 24
+  freq_masks: 2
+  freq_mask_param: 8
+  spec_augment_prob: 1.0
+  time_shift: true
+  time_shift_ms: 100.0
+  pitch_shift: false
+  pitch_shift_steps: 2.0
+  time_stretch: false
+  time_stretch_min: 0.9
+  time_stretch_max: 1.1
+  waveform_prob: 0.5
+
+schedule:
+  scheduler: cosine
+  early_stopping: true
+  patience: 12
+  min_delta: 0.0
+  val_fold: null
+  plateau_factor: 0.5
+  plateau_patience: 5

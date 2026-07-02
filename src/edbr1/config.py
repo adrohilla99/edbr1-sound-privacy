@@ -126,6 +126,95 @@ class ScheduleConfig:
 
 
 @dataclass(frozen=True)
+class EncoderConfig:
+    """On-device encoder E: a depthwise-separable conv stack -> latent grid.
+
+    The encoder maps a ``(1, n_mels, n_frames)`` log-mel spectrogram to a latent
+    grid of shape ``(latent_dim, latent_freq, latent_frames)``. That grid is the
+    sequence of tokens the bottleneck quantises: there are
+    ``latent_freq * latent_frames`` token positions per clip, so together with
+    ``TrainConfig.clip_seconds`` they fix the token rate (see
+    :mod:`edbr1.bitrate`).
+
+    Downsampling to the target grid is done with real strided pooling inside the
+    conv trunk (the number of freq/time halvings is derived from the target grid
+    so the pre-pool map is never smaller than the target), followed by an exact
+    adaptive average pool. The token count therefore corresponds to genuine
+    encoder outputs -- it is never inflated by upsampling.
+
+    Defaults are sized to reproduce the canonical baseline when the bottleneck is
+    disabled: a MobileNet-style depthwise-separable trunk well under 500K
+    parameters. ``channels`` ramp from ``base_channels`` towards ``latent_dim``
+    over however many blocks the downsampling schedule needs (at least
+    ``min_depth`` for capacity).
+    """
+
+    base_channels: int = 32
+    latent_dim: int = 128
+    # Latent token grid. latent_freq * latent_frames token positions per clip.
+    latent_freq: int = 8
+    latent_frames: int = 50
+    # Minimum number of depthwise-separable blocks (capacity floor). More blocks
+    # are added automatically if the target grid needs more downsampling stages.
+    min_depth: int = 3
+    # Single dropout before the linear classifier head (mirrors SmallAudioCNN).
+    dropout: float = 0.3
+
+    def __post_init__(self) -> None:
+        for name, value in (
+            ("base_channels", self.base_channels),
+            ("latent_dim", self.latent_dim),
+            ("latent_freq", self.latent_freq),
+            ("latent_frames", self.latent_frames),
+            ("min_depth", self.min_depth),
+        ):
+            if value < 1:
+                raise ValueError(f"EncoderConfig.{name} must be >= 1, got {value}")
+
+    def tokens_per_clip(self) -> int:
+        """Number of latent token positions emitted per clip."""
+        return self.latent_freq * self.latent_frames
+
+
+@dataclass(frozen=True)
+class BottleneckConfig:
+    """Discrete (VQ-VAE) bottleneck B inserted between encoder and classifier.
+
+    ``type='none'`` is the control: the continuous latent passes straight through
+    (no quantisation, no auxiliary loss), reproducing an ordinary encoder ->
+    classifier network. ``type='vq'`` enables a van den Oord et al. (2017) vector
+    quantiser: each latent token is snapped to its nearest of ``codebook_size``
+    entries, a straight-through estimator carries gradients back to the encoder,
+    and a codebook + ``commitment_beta``-weighted commitment loss trains the
+    codebook (Reference: "Neural Discrete Representation Learning", VQ-VAE).
+
+    The bitrate of a ``vq`` operating point is
+    ``tokens_per_second * log2(codebook_size)`` (see :mod:`edbr1.bitrate`); the
+    codebook vector dimension is :attr:`EncoderConfig.latent_dim`.
+
+    ``ema`` switches the codebook from loss-based updates to exponential-moving-
+    average updates (van den Oord et al., Appendix A). EMA is more collapse-
+    resistant; it is off by default because plain loss-based VQ collapse at low
+    bitrate is itself a finding we want to observe honestly.
+    """
+
+    type: str = "none"  # "none" | "vq"
+    codebook_size: int = 512
+    commitment_beta: float = 0.25
+    ema: bool = False
+    ema_decay: float = 0.99
+    ema_epsilon: float = 1e-5
+
+    def __post_init__(self) -> None:
+        if self.type not in ("none", "vq"):
+            raise ValueError(f"bottleneck type must be 'none' or 'vq', got {self.type!r}")
+        if self.codebook_size < 1:
+            raise ValueError(f"codebook_size must be >= 1, got {self.codebook_size}")
+        if not 0.0 < self.ema_decay < 1.0:
+            raise ValueError(f"ema_decay must be in (0, 1), got {self.ema_decay}")
+
+
+@dataclass(frozen=True)
 class TrainConfig:
     """Baseline training hyper-parameters and bookkeeping."""
 
@@ -145,13 +234,23 @@ class TrainConfig:
     # baseline) or "per_band" (a mean/std per mel band). Either way the stats
     # are estimated on the TRAINING folds only -- never the test fold.
     norm: str = "global"
+    # Which model to build: "cnn" is the original SmallAudioCNN (the legacy
+    # baseline path, left byte-for-byte unchanged); "encoder_classifier" is the
+    # refactored encoder -> bottleneck -> classifier used for the bitrate sweep.
+    model: str = "cnn"
     features: FeatureConfig = field(default_factory=FeatureConfig)
     augment: AugmentConfig = field(default_factory=AugmentConfig)
     schedule: ScheduleConfig = field(default_factory=ScheduleConfig)
+    encoder: EncoderConfig = field(default_factory=EncoderConfig)
+    bottleneck: BottleneckConfig = field(default_factory=BottleneckConfig)
 
     def __post_init__(self) -> None:
         if self.norm not in ("global", "per_band"):
             raise ValueError(f"norm must be 'global' or 'per_band', got {self.norm!r}")
+        if self.model not in ("cnn", "encoder_classifier"):
+            raise ValueError(
+                f"model must be 'cnn' or 'encoder_classifier', got {self.model!r}"
+            )
 
 
 def _filter_known(cls: type, data: dict[str, Any]) -> dict[str, Any]:
@@ -175,11 +274,21 @@ def schedule_config_from_dict(data: dict[str, Any]) -> ScheduleConfig:
     return ScheduleConfig(**_filter_known(ScheduleConfig, data))
 
 
+def encoder_config_from_dict(data: dict[str, Any]) -> EncoderConfig:
+    return EncoderConfig(**_filter_known(EncoderConfig, data))
+
+
+def bottleneck_config_from_dict(data: dict[str, Any]) -> BottleneckConfig:
+    return BottleneckConfig(**_filter_known(BottleneckConfig, data))
+
+
 def train_config_from_dict(data: dict[str, Any]) -> TrainConfig:
     data = dict(data)
     feats = data.pop("features", {}) or {}
     aug = data.pop("augment", {}) or {}
     sched = data.pop("schedule", {}) or {}
+    enc = data.pop("encoder", {}) or {}
+    bottleneck = data.pop("bottleneck", {}) or {}
     if "test_folds" in data and data["test_folds"] is not None:
         data["test_folds"] = tuple(data["test_folds"])
     kwargs = _filter_known(TrainConfig, data)
@@ -187,6 +296,8 @@ def train_config_from_dict(data: dict[str, Any]) -> TrainConfig:
         features=feature_config_from_dict(feats),
         augment=augment_config_from_dict(aug),
         schedule=schedule_config_from_dict(sched),
+        encoder=encoder_config_from_dict(enc),
+        bottleneck=bottleneck_config_from_dict(bottleneck),
         **kwargs,
     )
 
