@@ -265,6 +265,7 @@ def train_one_fold(
     config: TrainConfig,
     device: torch.device,
     class_names: Sequence[str],
+    cache_dir: str | Path | None = None,
 ) -> dict[str, Any]:
     """Train on all folds except ``test_fold`` and evaluate on it.
 
@@ -272,6 +273,9 @@ def train_one_fold(
     fold is carved off as a validation set; the best-by-validation checkpoint
     is restored before the held-out test fold is scored. Normalisation stats
     are always estimated on the (inner) training folds only.
+
+    ``cache_dir`` (if given) enables the dataset's on-disk waveform cache, which
+    is bit-identical to recomputing and only removes the per-epoch decode cost.
     """
     import pandas as pd
 
@@ -289,10 +293,11 @@ def train_one_fold(
 
     augment = config.augment if config.augment.enabled else None
     train_ds = UrbanSound8KDataset(
-        train_df, config.features, config.clip_seconds, train=True, augment=augment
+        train_df, config.features, config.clip_seconds, train=True, augment=augment,
+        cache_dir=cache_dir,
     )
     test_ds = UrbanSound8KDataset(
-        test_df, config.features, config.clip_seconds, train=False
+        test_df, config.features, config.clip_seconds, train=False, cache_dir=cache_dir
     )
 
     # Training loader: workers (parallel CPU decode/resample/augment) kept
@@ -308,7 +313,7 @@ def train_one_fold(
     val_loader: DataLoader[tuple[Tensor, int]] | None = None
     if val_df is not None:
         val_ds = UrbanSound8KDataset(
-            val_df, config.features, config.clip_seconds, train=False
+            val_df, config.features, config.clip_seconds, train=False, cache_dir=cache_dir
         )
         val_loader = _make_loader(
             val_ds, shuffle=False, config=config, device=device, num_workers=0
@@ -319,7 +324,7 @@ def train_one_fold(
     # so it is reused -- keeping the plain baseline path unchanged.
     if augment is not None:
         norm_ds = UrbanSound8KDataset(
-            train_df, config.features, config.clip_seconds, train=False
+            train_df, config.features, config.clip_seconds, train=False, cache_dir=cache_dir
         )
         norm_loader: DataLoader[tuple[Tensor, int]] = _make_loader(
             norm_ds, shuffle=False, config=config, device=device
@@ -504,13 +509,15 @@ def run_training(
     results_dir: Path,
     device: torch.device,
     test_folds: Sequence[int] | None = None,
+    cache_dir: str | Path | None = None,
 ) -> dict[str, Any]:
     """Run the CV protocol for ``config``, write its artifact dir, return the summary.
 
     The returned dict is exactly what is written to ``results.json`` plus a
     ``run_dir`` key pointing at the timestamped artifact directory. Shared by the
     CLI (:func:`main`) and the bitrate sweep runner so both produce identical
-    per-run artifacts.
+    per-run artifacts. ``cache_dir`` enables the (results-preserving) waveform
+    cache.
     """
     folds = tuple(test_folds) if test_folds else config.test_folds
     metadata = load_metadata(root)
@@ -539,7 +546,7 @@ def run_training(
     fold_metrics: list[dict[str, Any]] = []
     for test_fold in folds:
         print(f"\n=== Fold {test_fold} ===")
-        metrics = train_one_fold(metadata, test_fold, config, device, class_names)
+        metrics = train_one_fold(metadata, test_fold, config, device, class_names, cache_dir)
         fold_metrics.append(metrics)
         print(f"  fold {test_fold} macro-F1 = {metrics['macro_f1']:.4f}")
         save_confusion_matrix(
@@ -654,6 +661,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Subset of folds to evaluate (default: all from config).",
     )
     parser.add_argument("--device", default="auto", help="'auto', 'cpu', or 'cuda'.")
+    parser.add_argument(
+        "--wav-cache",
+        type=Path,
+        default=None,
+        help="Directory for the on-disk resampled-waveform cache (decode once, "
+        "reuse across epochs/folds; results are bit-identical). Off by default.",
+    )
     args = parser.parse_args(argv)
 
     config = load_train_config(args.config)
@@ -667,6 +681,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         results_dir=args.results_dir,
         device=device,
         test_folds=args.test_folds,
+        cache_dir=args.wav_cache,
     )
     return 0
 

@@ -14,9 +14,12 @@ Audio lives at:  <root>/audio/fold<fold>/<slice_file_name>
 """
 from __future__ import annotations
 
+import hashlib
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import torch
 from torch import Tensor
@@ -174,6 +177,7 @@ class UrbanSound8KDataset(Dataset[tuple[Tensor, int]]):
         *,
         train: bool = False,
         augment: AugmentConfig | None = None,
+        cache_dir: str | Path | None = None,
     ) -> None:
         self.metadata = metadata.reset_index(drop=True)
         self.config = feature_config or FeatureConfig()
@@ -183,6 +187,12 @@ class UrbanSound8KDataset(Dataset[tuple[Tensor, int]]):
         self.augment = augment
         # Augmentation is on only for training data with an enabled config.
         self.augment_on = bool(train and augment is not None and augment.enabled)
+        # Optional on-disk cache of decoded+resampled mono waveforms. The decode
+        # and resample are deterministic per file, so a cached waveform is
+        # bit-identical to recomputing it -- caching only removes the (dominant)
+        # per-epoch decode cost and never changes results. Augmentation still
+        # runs per epoch on the returned waveform, so the RNG stream is untouched.
+        self.cache_dir = Path(cache_dir) if cache_dir is not None else None
 
     def __len__(self) -> int:
         return len(self.metadata)
@@ -202,17 +212,50 @@ class UrbanSound8KDataset(Dataset[tuple[Tensor, int]]):
             return torch.nn.functional.pad(wav, (0, self.target_len - n))
         return wav[..., : self.target_len]
 
-    def __getitem__(self, index: int) -> tuple[Tensor, int]:
-        row = self.metadata.iloc[index]
-        wav, sr = self._load_waveform(row["path"])
+    def _cache_path(self, path: str) -> Path:
+        """Deterministic cache filename for ``path`` at the target sample rate."""
+        assert self.cache_dir is not None
+        key = f"{path}|sr={self.config.sample_rate}"
+        digest = hashlib.md5(key.encode("utf-8")).hexdigest()
+        return self.cache_dir / f"{digest}.npy"
 
-        # Downmix + resample at the waveform level so the fixed-length crop
-        # is applied at the target rate (uniform frame count across a batch).
+    @staticmethod
+    def _save_cache(cpath: Path, mono: Tensor) -> None:
+        """Write ``mono`` to ``cpath`` atomically (workers may race on a file)."""
+        cpath.parent.mkdir(parents=True, exist_ok=True)
+        tmp = cpath.with_name(f"{cpath.name}.{os.getpid()}.tmp")
+        # Save via a file handle so numpy does not append a second ".npy".
+        with open(tmp, "wb") as fh:
+            np.save(fh, mono.numpy())
+        os.replace(tmp, cpath)  # atomic: readers only ever see a complete file
+
+    def _resampled_mono(self, path: str) -> Tensor:
+        """Mono waveform at the target sample rate, via the disk cache if enabled.
+
+        Down-mixes to mono and resamples at the waveform level so the later
+        fixed-length crop is applied at the target rate. The result is cached
+        (bit-identically) when ``cache_dir`` is set.
+        """
+        if self.cache_dir is not None:
+            cpath = self._cache_path(path)
+            if cpath.exists():
+                return torch.from_numpy(np.load(cpath))
+
+        wav, sr = self._load_waveform(path)
         import torchaudio.functional as AF  # lazy import
 
         mono = wav.mean(dim=0)
         if sr != self.config.sample_rate:
             mono = AF.resample(mono, sr, self.config.sample_rate)
+        mono = mono.contiguous()
+
+        if self.cache_dir is not None:
+            self._save_cache(self._cache_path(path), mono)
+        return mono
+
+    def __getitem__(self, index: int) -> tuple[Tensor, int]:
+        row = self.metadata.iloc[index]
+        mono = self._resampled_mono(row["path"])
 
         # Waveform-level augmentation runs before the length fix so a
         # length-changing time stretch is re-normalised to target_len.

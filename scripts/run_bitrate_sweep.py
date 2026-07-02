@@ -177,6 +177,16 @@ def main(argv: list[str] | None = None) -> int:
         "--test-folds", type=int, nargs="+", default=None,
         help="Subset of folds (DEBUG plumbing only; results require the full 10-fold set).",
     )
+    parser.add_argument(
+        "--wav-cache", type=Path, default=None,
+        help="Directory for the resampled-waveform cache (decode once, reuse across "
+        "epochs/folds/points; results bit-identical). Strongly speeds the sweep.",
+    )
+    parser.add_argument(
+        "--num-workers", type=int, default=None,
+        help="Override dataloader workers for every point (e.g. 18 to use idle cores). "
+        "Recorded in each run's saved config.",
+    )
     args = parser.parse_args(argv)
 
     device = _pick_device(args.device)
@@ -210,14 +220,19 @@ def main(argv: list[str] | None = None) -> int:
     for i, cfg_path in enumerate(queue, start=1):
         print(f"\n{'#' * 70}\n# [{i}/{len(queue)}] {cfg_path.name}\n{'#' * 70}")
         config = load_train_config(cfg_path)
+        overrides: dict[str, Any] = {}
         if args.epochs is not None:
+            overrides["epochs"] = args.epochs
+        if args.num_workers is not None:
+            overrides["num_workers"] = args.num_workers
+        if overrides:
             import dataclasses
 
-            config = dataclasses.replace(config, epochs=args.epochs)
+            config = dataclasses.replace(config, **overrides)
         try:
             summary = run_training(
                 config, root=args.root, results_dir=args.results_dir, device=device,
-                test_folds=args.test_folds,
+                test_folds=args.test_folds, cache_dir=args.wav_cache,
             )
         except Exception as exc:  # keep the sweep alive; record the failure
             print(f"!! {cfg_path.name} FAILED: {exc!r}")
