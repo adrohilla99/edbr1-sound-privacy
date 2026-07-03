@@ -70,3 +70,92 @@ The per-fold confusion matrices for both full runs are saved alongside their
 These show which classes are hard — expected to be the acoustically overlapping
 ones (drilling vs jackhammer, air_conditioner vs engine_idling) — which becomes
 useful when explaining how the privacy bottleneck affects different sound types.
+
+## UrbanSound8K — utility vs bitrate (VQ discrete bottleneck, official 10-fold CV)
+
+The project's first trade-off curve. The baseline classifier is split into an
+on-device encoder **E** → a VQ discrete bottleneck **B** → a classifier **C**
+(VQ-VAE style: codebook, straight-through estimator, commitment loss). Codebook
+size is held at **K = 1024** (10 bits/token); the **token rate** is swept to set
+the bitrate, reported honestly as
+`bits_per_second = tokens_per_second · log₂(codebook_size)`. There is **no
+adversarial objective yet** — this is the utility-only reference the later
+privacy results are compared against.
+
+Each operating point is a full official **10-fold CV** run under the same
+invariants as the baseline (leak-guarded fold split, train-only
+normalisation/early-stopping stats, seed 1337 + deterministic per-worker
+seeding). The no-bottleneck encoder→classifier **control** — 0.748 ± 0.058,
+statistically identical to the 0.746 canonical CNN — is the utility ceiling.
+
+| bits/s | tokens/s × log₂K | Macro-F1 (10-fold) | perplexity | codes used | run dir (under `results/`) |
+|--------|------------------|--------------------|-----------|------------|----------------------------|
+| ∞ (control) | — (no bottleneck) | **0.748 ± 0.058** | — | — | `us8k_encoder_20260702_181348/` |
+| 80 | 8 × 10 | 0.506 ± 0.106 | 4.2 | 0.5% | `us8k_vq_20260702_233341/` |
+| 250 | 25 × 10 | 0.639 ± 0.072 | 6.4 | 0.7% | `us8k_vq_20260703_015506/` |
+| 1000 | 100 × 10 | 0.690 ± 0.027 | 12.3 | 1.6% | `us8k_vq_20260703_040308/` |
+| 2000 | 200 × 10 | 0.687 ± 0.054 | 17.2 | 2.5% | `us8k_vq_20260703_063440/` |
+| 4000 | 400 × 10 | 0.697 ± 0.038 | 22.7 | 3.8% | `us8k_vq_20260703_091718/` |
+| 16000 | 1600 × 10 | 0.724 ± 0.040 | 25.3 | 5.4% | `us8k_vq_20260703_120335/` |
+
+Sweep wall time 59,563 s (~16.5 h, one RTX 5060). Aggregate artifact
+`results/us8k_vq_sweep_20260702_233340/` (`sweep.json`, `sweep.csv`,
+`bitrate_curve.png`).
+
+### Shape of the curve
+
+```
+control (no bottleneck)   0.748 ± 0.058
+    80 bits/s             0.506 ± 0.106
+   250 bits/s             0.639 ± 0.072
+  1000 bits/s             0.690 ± 0.027
+  2000 bits/s             0.687 ± 0.054
+  4000 bits/s             0.697 ± 0.038
+ 16000 bits/s             0.724 ± 0.040
+```
+
+- Steep rise 80 → 1000 bits/s (0.506 → 0.690), then a **plateau at ~0.69 through
+  4000 bits/s**, and only a partial recovery to **0.724 at 16 kbits/s** — still
+  ~0.024 under the control, i.e. just inside the control's ±0.058 fold noise. The
+  VQ bottleneck never fully reaches the unquantised ceiling in this range.
+- **80 bits/s is both low and unstable** (±0.106, per-fold spread 0.37): at
+  extreme compression some folds essentially fail. This is the low-bitrate
+  fall-off the curve is meant to expose — reported as-is, not smoothed.
+
+### Codebook collapse (reported plainly)
+
+The codebook is **badly underused at every operating point.** Perplexity never
+exceeds ~25 of 1024, and the fraction of codes ever used peaks at 5.4% (the
+80 bits/s point uses ~0.5%, i.e. roughly four codes). So the *nominal* bitrate
+overstates the true information rate: an effective rate of
+`tokens/s · log₂(perplexity)` is only ~20–47% of nominal.
+
+| nominal bits/s | perplexity (≈ effective codes) | effective bits/s ≈ tok/s·log₂(perplexity) | % of nominal |
+|----------------|-------------------------------|-------------------------------------------|--------------|
+| 80 | 4.2 | ~17 | 21% |
+| 250 | 6.4 | ~67 | 27% |
+| 1000 | 12.3 | ~362 | 36% |
+| 2000 | 17.2 | ~821 | 41% |
+| 4000 | 22.7 | ~1800 | 45% |
+| 16000 | 25.3 | ~7500 | 47% |
+
+With only classification + commitment loss to shape it (no adversary, no entropy
+pressure), the quantiser settles on a handful of prototypes rather than spreading
+mass across the codebook. This is itself a result to carry forward: it is the
+codebook-usage baseline the privacy bottleneck's behaviour will be read against,
+and it means later comparisons should track the **effective** rate, not just the
+nominal capacity.
+
+### Reproduce
+
+```
+python -u scripts/run_bitrate_sweep.py \
+  --control-results results/us8k_encoder_20260702_181348 \
+  --wav-cache data/processed/wavcache
+```
+
+`configs/encoder_nobottleneck.yaml` is the control; `configs/vq/vq_*bps.yaml` are
+the six operating points. `--wav-cache` decodes+resamples each clip once to a
+gitignored on-disk cache (bit-identical to recomputing); `--num-workers` can
+override dataloader workers. The exact resolved config is saved as `config.yaml`
+inside every run dir.

@@ -17,8 +17,8 @@
 ## Day 4+
 
 - [ ] Draft docs/03_methodology.md
-- [ ] Encoder + classifier skeleton
-- [ ] VQ bottleneck implementation
+- [x] Encoder + classifier skeleton — depthwise-separable encoder E (~48K params) → classifier C; no-bottleneck control reproduces the baseline (**0.748 ± 0.058**, official 10-fold), artifact `results/us8k_encoder_20260702_181348/`
+- [x] VQ bottleneck implementation — VQ-VAE bottleneck (codebook, straight-through estimator, commitment loss, perplexity/usage) + honest `bits_per_second`; **6-point utility-vs-bitrate sweep** (80–16000 bits/s, full 10-fold each) done → curve + tables in [RESULTS.md](RESULTS.md), artifact `results/us8k_vq_sweep_20260702_233340/`. Codebook collapses at every point (≤5.4% of 1024 codes used) — reported plainly.
 - [ ] Adversarial gradient-reversal head
 - [ ] Probe networks (speaker-ID, ASR, inverter)
 - [ ] Pareto evaluation script
