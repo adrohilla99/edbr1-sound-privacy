@@ -117,6 +117,76 @@ def test_vq_ema_updates_codebook_and_has_no_codebook_gradient():
     assert float(out.loss) >= 0.0
 
 
+# --- anti-collapse: k-means init + dead-code revival -----------------------
+
+
+def test_vq_kmeans_init_moves_codebook_into_the_data():
+    # The tiny uniform init sits at ~0; k-means init must move every code into
+    # the (here, far-from-zero) encoder-output distribution on the first batch.
+    torch.manual_seed(0)
+    vq = VectorQuantizer(8, 4, kmeans_init=True)
+    vq.train()
+    before = vq.embedding.detach().clone()
+    z = torch.randn(4, 4, 2, 4) + 10.0  # data centred at 10, nowhere near init
+    vq(z)
+    after = vq.embedding.detach()
+    assert bool(vq._initted)
+    assert not torch.allclose(after, before)
+    assert float(after.mean()) > 5.0  # was ~0, now in the data region
+
+
+def test_vq_kmeans_init_runs_only_once():
+    # _initted gates the data-dependent init to the first training batch only.
+    torch.manual_seed(0)
+    vq = VectorQuantizer(8, 4, kmeans_init=True)
+    vq.train()
+    vq(torch.randn(4, 4, 2, 4) + 10.0)
+    codebook = vq.embedding.detach().clone()  # centred ~ +10
+    vq(torch.randn(4, 4, 2, 4) - 10.0)  # a very different second batch
+    # No re-init (and no optimiser step), so the codebook is unchanged.
+    assert torch.equal(vq.embedding.detach(), codebook)
+
+
+def test_vq_dead_code_revival_reseeds_unused_codes():
+    # Restart every step with an enormous threshold so all under-used codes are
+    # revived to random batch vectors (a constant vector here) -> codebook lands
+    # on the data and off the uniform init.
+    torch.manual_seed(0)
+    vq = VectorQuantizer(
+        16, 3, restart_dead_codes=True, restart_interval=1,
+        dead_code_threshold=1e9, usage_decay=0.5,
+    )
+    vq.train()
+    before = vq.embedding.detach().clone()
+    z = torch.zeros(2, 3, 2, 4) + 5.0  # constant batch vector [5, 5, 5]
+    vq(z)
+    after = vq.embedding.detach()
+    assert not torch.allclose(after, before)
+    assert torch.allclose(after, torch.full_like(after, 5.0), atol=1e-4)
+    assert int(vq._steps) == 1
+
+
+def test_vq_dead_code_revival_off_by_default_leaves_codebook_static():
+    # Without the flag, a forward pass never mutates the (Parameter) codebook.
+    vq = VectorQuantizer(16, 3)
+    vq.train()
+    before = vq.embedding.detach().clone()
+    vq(torch.randn(2, 3, 2, 4))
+    assert torch.equal(vq.embedding.detach(), before)
+    assert int(vq._steps) == 0  # step counter only advances under revival
+
+
+def test_perplexity_from_counts_uniform_single_and_empty():
+    from edbr1.train import _perplexity_from_counts
+
+    k = 8
+    assert abs(_perplexity_from_counts(torch.ones(k)) - k) < 1e-6  # uniform -> K
+    degenerate = torch.zeros(k)
+    degenerate[3] = 100.0
+    assert abs(_perplexity_from_counts(degenerate) - 1.0) < 1e-6  # one code -> 1
+    assert _perplexity_from_counts(torch.zeros(k)) == 0.0  # empty -> 0
+
+
 # --- EncoderClassifier wiring ----------------------------------------------
 
 

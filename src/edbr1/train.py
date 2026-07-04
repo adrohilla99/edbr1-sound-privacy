@@ -165,6 +165,16 @@ def _codebook_size(model: nn.Module) -> int:
     return int(getattr(bottleneck, "codebook_size", 0))
 
 
+def _perplexity_from_counts(code_counts: Tensor) -> float:
+    """Codebook perplexity ``exp(entropy)`` from a ``(K,)`` usage histogram."""
+    total = float(code_counts.sum())
+    if total <= 0:
+        return 0.0
+    probs = code_counts.to(torch.float64) / total
+    nz = probs[probs > 0]
+    return float(torch.exp(-(nz * nz.log()).sum()))
+
+
 @dataclasses.dataclass
 class EpochResult:
     """Outcome of one epoch/eval pass."""
@@ -360,6 +370,10 @@ def train_one_fold(
         )
         if train_res.vq_loss:
             msg += f" vq={train_res.vq_loss:.4f}"
+        if train_res.code_counts is not None:
+            # Per-epoch train-set perplexity makes codebook collapse visible as it
+            # happens (out of _codebook_size(model) codes), not just at fold end.
+            msg += f" ppl={_perplexity_from_counts(train_res.code_counts):.1f}"
 
         val_f1: float | None = None
         if val_loader is not None:
@@ -437,13 +451,8 @@ def _bottleneck_metrics(
         "bits_per_second": bitrate.bits_per_second(tps, codebook_size),
     }
     if code_counts is not None:
-        counts = code_counts.to(torch.float64)
-        total = float(counts.sum())
-        used = int((counts > 0).sum())
-        probs = counts / max(total, 1.0)
-        nz = probs[probs > 0]
-        perplexity = float(torch.exp(-(nz * nz.log()).sum())) if nz.numel() else 0.0
-        out["codebook_perplexity"] = perplexity
+        used = int((code_counts > 0).sum())
+        out["codebook_perplexity"] = _perplexity_from_counts(code_counts)
         out["codebook_used"] = used
         out["codebook_fraction_used"] = used / codebook_size
     return out

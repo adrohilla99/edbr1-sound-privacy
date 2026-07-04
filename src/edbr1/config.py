@@ -196,6 +196,18 @@ class BottleneckConfig:
     average updates (van den Oord et al., Appendix A). EMA is more collapse-
     resistant; it is off by default because plain loss-based VQ collapse at low
     bitrate is itself a finding we want to observe honestly.
+
+    Anti-collapse levers (all off by default, so the original collapsed sweep
+    stays reproducible and each lever can be tested on its own):
+
+    * ``kmeans_init`` -- data-dependent codebook initialisation from the first
+      training batch's encoder outputs (a few Lloyd iterations), instead of the
+      tiny uniform init that starts far from the post-ReLU latent distribution.
+    * ``restart_dead_codes`` -- periodic random restart (Dhariwal et al. 2020;
+      Williams et al. 2020): every ``restart_interval`` training steps, codes
+      whose usage EMA has fallen below ``dead_code_threshold`` are re-seeded to
+      random encoder vectors from the current batch. ``usage_decay`` is the EMA
+      momentum of the per-code usage tracker.
     """
 
     type: str = "none"  # "none" | "vq"
@@ -204,6 +216,12 @@ class BottleneckConfig:
     ema: bool = False
     ema_decay: float = 0.99
     ema_epsilon: float = 1e-5
+    # --- anti-collapse (default off; see class docstring) ---
+    kmeans_init: bool = False
+    restart_dead_codes: bool = False
+    restart_interval: int = 250
+    dead_code_threshold: float = 1.0
+    usage_decay: float = 0.99
 
     def __post_init__(self) -> None:
         if self.type not in ("none", "vq"):
@@ -212,6 +230,10 @@ class BottleneckConfig:
             raise ValueError(f"codebook_size must be >= 1, got {self.codebook_size}")
         if not 0.0 < self.ema_decay < 1.0:
             raise ValueError(f"ema_decay must be in (0, 1), got {self.ema_decay}")
+        if self.restart_interval < 1:
+            raise ValueError(f"restart_interval must be >= 1, got {self.restart_interval}")
+        if not 0.0 < self.usage_decay < 1.0:
+            raise ValueError(f"usage_decay must be in (0, 1), got {self.usage_decay}")
 
 
 @dataclass(frozen=True)

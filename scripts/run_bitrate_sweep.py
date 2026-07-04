@@ -187,6 +187,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Override dataloader workers for every point (e.g. 18 to use idle cores). "
         "Recorded in each run's saved config.",
     )
+    parser.add_argument(
+        "--anti-collapse", action="store_true",
+        help="Enable the anti-collapse combo on every VQ point: EMA codebook + "
+        "k-means init + dead-code revival. Recorded in each run's saved config.",
+    )
     args = parser.parse_args(argv)
 
     device = _pick_device(args.device)
@@ -220,14 +225,19 @@ def main(argv: list[str] | None = None) -> int:
     for i, cfg_path in enumerate(queue, start=1):
         print(f"\n{'#' * 70}\n# [{i}/{len(queue)}] {cfg_path.name}\n{'#' * 70}")
         config = load_train_config(cfg_path)
+        import dataclasses
+
         overrides: dict[str, Any] = {}
         if args.epochs is not None:
             overrides["epochs"] = args.epochs
         if args.num_workers is not None:
             overrides["num_workers"] = args.num_workers
+        # Enable the anti-collapse combo on VQ points (leaves the control alone).
+        if args.anti_collapse and config.bottleneck.type == "vq":
+            overrides["bottleneck"] = dataclasses.replace(
+                config.bottleneck, ema=True, kmeans_init=True, restart_dead_codes=True
+            )
         if overrides:
-            import dataclasses
-
             config = dataclasses.replace(config, **overrides)
         try:
             summary = run_training(

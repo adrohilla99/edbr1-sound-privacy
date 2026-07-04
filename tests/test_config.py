@@ -158,3 +158,23 @@ def test_invalid_model_and_bottleneck_rejected():
         BottleneckConfig(type="bogus")
     with pytest.raises(ValueError, match="codebook_size must be"):
         BottleneckConfig(type="vq", codebook_size=0)
+    with pytest.raises(ValueError, match="restart_interval must be"):
+        BottleneckConfig(type="vq", restart_interval=0)
+    with pytest.raises(ValueError, match="usage_decay must be"):
+        BottleneckConfig(type="vq", usage_decay=1.0)
+
+
+def test_anti_collapse_flags_default_off_and_round_trip():
+    import dataclasses
+
+    from edbr1.config import BottleneckConfig, bottleneck_config_from_dict
+
+    # Defaults keep every anti-collapse lever off so the collapsed sweep is reproducible.
+    d = BottleneckConfig()
+    assert (d.kmeans_init, d.restart_dead_codes) == (False, False)
+    # Enabled levers survive a dict round-trip (YAML-settable).
+    cfg = bottleneck_config_from_dict(
+        {"type": "vq", "ema": True, "kmeans_init": True, "restart_dead_codes": True}
+    )
+    assert cfg.ema and cfg.kmeans_init and cfg.restart_dead_codes
+    assert bottleneck_config_from_dict(dataclasses.asdict(cfg)) == cfg

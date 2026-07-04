@@ -159,3 +159,99 @@ the six operating points. `--wav-cache` decodes+resamples each clip once to a
 gitignored on-disk cache (bit-identical to recomputing); `--num-workers` can
 override dataloader workers. The exact resolved config is saved as `config.yaml`
 inside every run dir.
+
+## UrbanSound8K — fixing codebook collapse, then re-sweep (Phase 2b)
+
+The sweep above is honest but **throttled by accident**: its codebook collapsed
+at every point (≤5.4% of 1024 codes used, perplexity ≤25.3), so the *nominal*
+bitrate overstated the true information rate 2–5×. Before any adversarial-privacy
+work is built on top, the bottleneck must actually use its codebook — otherwise
+later leakage numbers would confound "our method hides speech" with "the
+bottleneck was throttled." This section diagnoses the collapse and fixes it.
+
+### Diagnosis
+
+Three standard causes, all present in the collapsed run:
+
+1. **Data-independent init far from the latent distribution (primary).** The
+   codebook was initialised `uniform(±1/K)` — a tiny blob at the origin — while
+   the encoder head ends in BatchNorm+ReLU, so latents are non-negative and
+   O(0.1–1). Most codes are nowhere near the data and are dead from step 0.
+2. **No EMA** (`ema: false`): loss-based updates only move *selected* codes, so
+   dead codes never migrate toward the data.
+3. **No dead-code revival**: nothing ever resets unused codes.
+
+Per-epoch perplexity (now logged) confirms it: the collapsed config sits at
+perplexity ~12 throughout; the fixed config climbs to ~880 within three epochs
+and holds (1000 bits/s, fold 1: ep1 135 → ep3 723 → ep4+ ~850–890).
+
+### Fix (config-gated, all off by default so the collapsed run stays reproducible)
+
+* **k-means init** — data-dependent codebook init from the first training
+  batch's encoder outputs (a few Lloyd iterations).
+* **EMA codebook** — van den Oord et al. (2017) Appendix A.
+* **dead-code revival** — every `restart_interval` steps, codes whose usage EMA
+  falls below `dead_code_threshold` are re-seeded to random batch vectors
+  (Dhariwal et al. 2020).
+
+Enabled together via `run_bitrate_sweep.py --anti-collapse`. Reference verify at
+1000 bits/s (folds 1–3): perplexity **12.6 → 703**, codes used **1.6% → 99.5%**,
+macro-F1 0.672 → 0.680.
+
+### Re-sweep — before (collapsed) → after (anti-collapse), full 10-fold
+
+| bits/s | macro-F1 collapsed → fixed | perplexity | codes used | effective bits/s (tok/s·log₂ ppl) |
+|--------|---------------------------|------------|------------|-----------------------------------|
+| 80 | 0.506 → **0.743** (+0.236) | 4.2 → 513.4 | 0.5% → 90.9% | 17 → 72 |
+| 250 | 0.639 → **0.754** (+0.115) | 6.4 → 626.7 | 0.7% → 98.8% | 67 → 232 |
+| 1000 | 0.690 → **0.723** (+0.033) | 12.3 → 691.9 | 1.6% → 99.7% | 362 → 943 |
+| 2000 | 0.687 → **0.734** (+0.047) | 17.2 → 691.2 | 2.5% → 99.9% | 821 → 1887 |
+| 4000 | 0.697 → **0.738** (+0.041) | 22.7 → 625.9 | 3.8% → 100.0% | 1802 → 3716 |
+| 16000 | 0.724 → **0.751** (+0.028) | 25.3 → 483.6 | 5.4% → 100.0% | 7455 → 14268 |
+| ∞ control | 0.748 ± 0.058 | — | — | — |
+
+Anti-collapse sweep wall time 45,743 s (~12.7 h, one RTX 5060). Artifact
+`results/us8k_vq_sweep_20260703_171719/` (`sweep.json`, `sweep.csv`,
+`bitrate_curve.png`); per-point run dirs listed in `sweep.json`.
+
+### Did fixing collapse change the curve? Yes — plainly.
+
+1. **Collapse is fixed.** Codes used rise from ≤5.4% to **90.9–100%**; the
+   effective rate is now **~89–94% of nominal** (was 21–47%). The reported
+   bitrates are now honest.
+2. **The curve flattens onto the control.** Every operating point lands at
+   0.72–0.75 macro-F1 — all within fold-noise of the 0.748 unbottlenecked
+   control. The collapsed curve's steep low-bitrate rise (0.506 → 0.724) is gone:
+
+```
+collapsed:  80→0.506  250→0.639  1000→0.690  2000→0.687  4000→0.697  16000→0.724
+anti-collapse: 80→0.743 250→0.754 1000→0.723 2000→0.734 4000→0.738 16000→0.751
+control 0.748
+```
+
+3. **The utility gain is concentrated at low bitrate** (+0.236 at 80 bits/s,
+   +0.115 at 250, then within noise): that is exactly where the collapsed
+   codebook (~4–6 live codes) was too small to separate 10 classes. Once the
+   codebook is used, **≈72 honest bits/s already matches the unbottlenecked
+   model** — this 10-way task needs very little information when it is spent
+   efficiently.
+
+Consequence for the privacy phase: on utility grounds the bottleneck can be
+pushed very low almost for free, so the interesting trade-off will be about *what
+else* those bits carry (speaker/speech leakage), not classification accuracy.
+
+### Reproduce
+
+```
+python -u scripts/run_bitrate_sweep.py \
+  --control-results results/us8k_encoder_20260702_181348 \
+  --wav-cache data/processed/wavcache --anti-collapse
+```
+
+The anti-collapse levers are `BottleneckConfig` fields
+(`kmeans_init`, `ema`, `restart_dead_codes`, `restart_interval`,
+`dead_code_threshold`), off by default; `--anti-collapse` sets the first three
+and the resolved values are saved in each run's `config.yaml`. The original
+collapsed sweep (`results/us8k_vq_sweep_20260702_233340/`) remains reproducible
+by omitting the flag — it stays a documented finding (the nominal-vs-effective
+bitrate discrepancy).
