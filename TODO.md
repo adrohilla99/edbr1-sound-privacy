@@ -16,9 +16,9 @@
 
 ## Day 4+
 
-- [ ] Draft docs/03_methodology.md
+- [x] Draft docs/03_methodology.md — front end, encoder, VQ + honest-bitrate, classifier, and the Phase-3 adversarial objective (overlay, GRL, train-only leak guards, sanity-vs-privacy caveat); evaluation probes remain a Phase-4 stub.
 - [x] Encoder + classifier skeleton — depthwise-separable encoder E (~48K params) → classifier C; no-bottleneck control reproduces the baseline (**0.748 ± 0.058**, official 10-fold), artifact `results/us8k_encoder_20260702_181348/`
-- [x] VQ bottleneck implementation — VQ-VAE bottleneck (codebook, straight-through estimator, commitment loss, perplexity/usage) + honest `bits_per_second`; **6-point utility-vs-bitrate sweep** (80–16000 bits/s, full 10-fold each) done → curve + tables in [RESULTS.md](RESULTS.md), artifact `results/us8k_vq_sweep_20260702_233340/`. Codebook collapses at every point (≤5.4% of 1024 codes used) — reported plainly.
-- [ ] Adversarial gradient-reversal head
-- [ ] Probe networks (speaker-ID, ASR, inverter)
-- [ ] Pareto evaluation script
+- [x] VQ bottleneck implementation — VQ-VAE bottleneck (codebook, straight-through estimator, commitment loss, perplexity/usage) + honest `bits_per_second`; **6-point utility-vs-bitrate sweep** (80–16000 bits/s, full 10-fold each) done → curve + tables in [RESULTS.md](RESULTS.md), artifact `results/us8k_vq_sweep_20260702_233340/`. Codebook collapses at every point (≤5.4% of 1024 codes used) — reported plainly. Collapse **fixed** (kmeans init + EMA + revival) → codes used 90.9–100%, curve flattens onto control (`results/us8k_vq_sweep_20260703_171719/`).
+- [x] Adversarial gradient-reversal head — GRL + (N+1)-way speech adversary on the code, LibriSpeech-into-UrbanSound8K overlay (train-only, leak-guarded); **lambda sweep {0..2} at the 1000 bits/s knee**, full 10-fold → [RESULTS.md](RESULTS.md), artifact `results/us8k_adv_lambda_20260704_112525/`. GRL stable, utility-neutral (Δ≈−0.004); training adversary stayed at the no-speech floor (sanity signal, **not** a privacy result).
+- [ ] Probe networks (speaker-ID, ASR, inverter) — Phase 4 (the actual privacy measurement)
+- [ ] Pareto evaluation script — Phase 4 (privacy-vs-utility, with the overlay eval + probes)

@@ -83,14 +83,55 @@ Keeping representational capacity in the encoder (not the classifier) means the
 utility-vs-bitrate curve reflects what the bottleneck preserves rather than extra
 downstream modelling.
 
-## Adversarial training objective
+## Adversarial training objective (Phase 3)
 
-Deferred to the next stage (gradient-reversal speech-suppression head). Not
-implemented yet; the current results are the plain-bottleneck baseline the
-adversarial frontier will be compared against.
+To ask whether the code can be made to *hide speech* without spending the
+(cheap) classification utility, a training-time adversary is attached to the
+code and fought with a gradient reversal layer.
+
+**Speech-overlay training stream.** The adversary needs speech to attack, so the
+training fold mixes LibriSpeech speech into each UrbanSound8K scene -- the "loud
+argument in the street" condition ([`edbr1.data.overlay`](../src/edbr1/data/overlay.py)).
+A scene gets speech with probability `overlay_prob`, mixed by RMS at an SNR drawn
+from a configured grid (speech = signal; e.g. `{0, 5, 10}` dB, so speech is
+prominent). The training-time speech attribute is a tractable proxy -- a closed
+set: **0 = no speech, 1..N = speaker id** over the `N` most-data
+`train-clean-100` speakers ([`edbr1.data.librispeech.SpeechPool`](../src/edbr1/data/librispeech.py)) --
+not full ASR (that is a Phase-4 probe). This is deliberately a proxy for "is
+someone speaking, and who", stated here and in code.
+
+**Leak-free and train-only.** The overlay and its speaker labels are applied to
+the **training fold only**; the validation and held-out **test folds are clean
+UrbanSound8K**. So (a) classification utility stays directly comparable to the
+non-adversarial curve and to the Phase-2 clean ceiling, and (b) no LibriSpeech
+speaker and no UrbanSound8K fold ever crosses the train/test boundary. The closed
+speaker set is drawn from a *training* subset (`train-clean-100`) only.
+
+**Gradient reversal + adversary head** ([`edbr1.models.adversary`](../src/edbr1/models/adversary.py)).
+A small MLP predicts the speech attribute from the (global-average-pooled)
+quantised code, behind a gradient reversal layer (Ganin & Lempitsky, 2015):
+identity on the forward pass, negated-and-scaled gradient on the backward pass.
+The total training loss is
+
+```
+cross_entropy(class) + codebook_loss + beta * commitment_loss + adversary_ce
+```
+
+with the GRL's `lambda` (linearly warmed up over `warmup_epochs`) scaling the
+*reversed* gradient that reaches the encoder through the straight-through
+estimator. The adversary head itself learns at full rate; only the encoder is
+pushed to make the code un-predictive of the speaker. The bitrate is fixed at the
+Phase-2 knee (1000 bits/s, anti-collapse codebook) and `lambda` is swept.
+
+**The training-adversary accuracy is a sanity signal, not a privacy result.** It
+is measured on the (train-only) overlay stream and only shows whether the
+adversary is learning and whether the encoder is fighting it. True privacy is
+measured in Phase 4 by *separate, stronger* probes; the training-time adversary
+is intentionally modest and weaker than those probes, by design.
 
 ## Evaluation probes (separate from training-time adversary)
 
-Deferred to the next stage (speaker-ID, ASR and inverter probes against the
-encoded representation, plus the speech-overlay evaluation pipeline). Not
-implemented yet.
+Deferred to Phase 4: independent, stronger speaker-ID / ASR / inverter probes
+trained against the frozen encoded representation, plus the held-out
+speech-overlay evaluation pipeline. These -- not the training-time adversary
+above -- produce the privacy numbers. Not implemented yet.

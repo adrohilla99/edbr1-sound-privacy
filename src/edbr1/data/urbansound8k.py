@@ -27,6 +27,7 @@ from torch.utils.data import Dataset
 
 from edbr1.config import AugmentConfig, FeatureConfig
 from edbr1.data.augment import augment_waveform, spec_augment
+from edbr1.data.overlay import SpeechOverlay
 from edbr1.features.melspec import LogMelExtractor
 
 # Class names indexed by classID (0..9), per the official dataset taxonomy.
@@ -253,20 +254,60 @@ class UrbanSound8KDataset(Dataset[tuple[Tensor, int]]):
             self._save_cache(self._cache_path(path), mono)
         return mono
 
-    def __getitem__(self, index: int) -> tuple[Tensor, int]:
+    def _scene_mono(self, index: int) -> tuple[Tensor, int]:
+        """Target-length mono scene waveform + classID (pre-mel overlay hook point).
+
+        Waveform-level augmentation runs before the length fix so a
+        length-changing time stretch is re-normalised to ``target_len``.
+        """
         row = self.metadata.iloc[index]
         mono = self._resampled_mono(row["path"])
-
-        # Waveform-level augmentation runs before the length fix so a
-        # length-changing time stretch is re-normalised to target_len.
         if self.augment_on:
             assert self.augment is not None
             mono = augment_waveform(mono, self.config.sample_rate, self.augment)
+        return self._fix_length(mono), int(row["classID"])
 
-        mono = self._fix_length(mono)
-
+    def _mel(self, mono: Tensor) -> Tensor:
+        """(1, n_mels, frames) log-mel for a ``target_len`` mono waveform."""
         log_mel = self.extractor(mono, self.config.sample_rate)  # (n_mels, frames)
         if self.augment_on:
             assert self.augment is not None
             log_mel = spec_augment(log_mel, self.augment)
-        return log_mel.unsqueeze(0), int(row["classID"])
+        return log_mel.unsqueeze(0)
+
+    def __getitem__(self, index: int) -> tuple[Tensor, int]:
+        mono, class_id = self._scene_mono(index)
+        return self._mel(mono), class_id
+
+
+class OverlaySpeechDataset(UrbanSound8KDataset):
+    """Training dataset that overlays speech and yields ``(mel, class, speech_label)``.
+
+    The mel path is identical to the base class; a :class:`SpeechOverlay` mixes a
+    LibriSpeech segment into the target-length scene *before* the mel transform,
+    and the extra label is the speech attribute the adversary predicts (0 = no
+    speech, 1..N = closed-set speaker). **Train-only** -- attach it to the
+    training fold alone so the held-out test fold stays clean.
+    """
+
+    def __init__(
+        self,
+        metadata: pd.DataFrame,
+        feature_config: FeatureConfig | None = None,
+        clip_seconds: float = 4.0,
+        *,
+        overlay: SpeechOverlay,
+        train: bool = True,
+        augment: AugmentConfig | None = None,
+        cache_dir: str | Path | None = None,
+    ) -> None:
+        super().__init__(
+            metadata, feature_config, clip_seconds,
+            train=train, augment=augment, cache_dir=cache_dir,
+        )
+        self.overlay = overlay
+
+    def __getitem__(self, index: int) -> tuple[Tensor, int, int]:  # type: ignore[override]
+        mono, class_id = self._scene_mono(index)
+        mixed, speech_label = self.overlay.apply(mono)
+        return self._mel(mixed), class_id, speech_label

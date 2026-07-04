@@ -237,6 +237,63 @@ class BottleneckConfig:
 
 
 @dataclass(frozen=True)
+class OverlayConfig:
+    """Speech-over-scene overlay for the adversarial training stream (train-only).
+
+    Mixes LibriSpeech speech into the UrbanSound8K scene at a sampled SNR so a
+    training-time adversary has a speech target. Applied to the **training fold
+    only**; the closed speaker set is drawn from a *training* subset
+    (``train-clean-100``) so no speaker reaches the clean, held-out test fold.
+    The speech attribute is (N+1)-way: 0 = no speech, 1..``num_speakers`` = the
+    closed-set speaker id.
+    """
+
+    enabled: bool = False
+    librispeech_root: str = "data/raw/librispeech/LibriSpeech"
+    subset: str = "train-clean-100"
+    num_speakers: int = 20
+    segments_per_speaker: int = 50
+    overlay_prob: float = 0.5
+    snr_db: tuple[float, ...] = (0.0, 5.0, 10.0)
+    seed: int = 1337
+
+    def __post_init__(self) -> None:
+        if self.subset not in ("train-clean-100", "dev-clean", "test-clean"):
+            raise ValueError(f"overlay subset must be a permitted subset, got {self.subset!r}")
+        if not 0.0 <= self.overlay_prob <= 1.0:
+            raise ValueError(f"overlay_prob must be in [0, 1], got {self.overlay_prob}")
+        if self.num_speakers < 1 or self.segments_per_speaker < 1:
+            raise ValueError("num_speakers and segments_per_speaker must be >= 1")
+        if len(self.snr_db) == 0:
+            raise ValueError("snr_db must be a non-empty list of SNR values (dB)")
+
+
+@dataclass(frozen=True)
+class AdversaryConfig:
+    """Gradient-reversal speech adversary on the code (training-time only).
+
+    A modest MLP predicts the overlay speech attribute from the quantised latent
+    through a gradient-reversal layer (Ganin & Lempitsky, 2015). ``grl_lambda`` is
+    the reversal strength, linearly warmed up over ``warmup_epochs`` epochs. This
+    is the training-time opponent, not the Phase-4 evaluation probes; its accuracy
+    is an internal sanity signal, never a privacy claim.
+    """
+
+    enabled: bool = False
+    grl_lambda: float = 1.0
+    warmup_epochs: int = 5
+    hidden_dim: int = 128
+
+    def __post_init__(self) -> None:
+        if self.grl_lambda < 0.0:
+            raise ValueError(f"grl_lambda must be >= 0, got {self.grl_lambda}")
+        if self.warmup_epochs < 0:
+            raise ValueError(f"warmup_epochs must be >= 0, got {self.warmup_epochs}")
+        if self.hidden_dim < 1:
+            raise ValueError(f"hidden_dim must be >= 1, got {self.hidden_dim}")
+
+
+@dataclass(frozen=True)
 class TrainConfig:
     """Baseline training hyper-parameters and bookkeeping."""
 
@@ -265,6 +322,8 @@ class TrainConfig:
     schedule: ScheduleConfig = field(default_factory=ScheduleConfig)
     encoder: EncoderConfig = field(default_factory=EncoderConfig)
     bottleneck: BottleneckConfig = field(default_factory=BottleneckConfig)
+    overlay: OverlayConfig = field(default_factory=OverlayConfig)
+    adversary: AdversaryConfig = field(default_factory=AdversaryConfig)
 
     def __post_init__(self) -> None:
         if self.norm not in ("global", "per_band"):
@@ -273,6 +332,8 @@ class TrainConfig:
             raise ValueError(
                 f"model must be 'cnn' or 'encoder_classifier', got {self.model!r}"
             )
+        if self.adversary.enabled and not self.overlay.enabled:
+            raise ValueError("adversary.enabled requires overlay.enabled (it needs speech labels)")
 
 
 def _filter_known(cls: type, data: dict[str, Any]) -> dict[str, Any]:
@@ -304,6 +365,17 @@ def bottleneck_config_from_dict(data: dict[str, Any]) -> BottleneckConfig:
     return BottleneckConfig(**_filter_known(BottleneckConfig, data))
 
 
+def overlay_config_from_dict(data: dict[str, Any]) -> OverlayConfig:
+    data = dict(data)
+    if "snr_db" in data and data["snr_db"] is not None:
+        data["snr_db"] = tuple(float(s) for s in data["snr_db"])
+    return OverlayConfig(**_filter_known(OverlayConfig, data))
+
+
+def adversary_config_from_dict(data: dict[str, Any]) -> AdversaryConfig:
+    return AdversaryConfig(**_filter_known(AdversaryConfig, data))
+
+
 def train_config_from_dict(data: dict[str, Any]) -> TrainConfig:
     data = dict(data)
     feats = data.pop("features", {}) or {}
@@ -311,6 +383,8 @@ def train_config_from_dict(data: dict[str, Any]) -> TrainConfig:
     sched = data.pop("schedule", {}) or {}
     enc = data.pop("encoder", {}) or {}
     bottleneck = data.pop("bottleneck", {}) or {}
+    overlay = data.pop("overlay", {}) or {}
+    adversary = data.pop("adversary", {}) or {}
     if "test_folds" in data and data["test_folds"] is not None:
         data["test_folds"] = tuple(data["test_folds"])
     kwargs = _filter_known(TrainConfig, data)
@@ -320,6 +394,8 @@ def train_config_from_dict(data: dict[str, Any]) -> TrainConfig:
         schedule=schedule_config_from_dict(sched),
         encoder=encoder_config_from_dict(enc),
         bottleneck=bottleneck_config_from_dict(bottleneck),
+        overlay=overlay_config_from_dict(overlay),
+        adversary=adversary_config_from_dict(adversary),
         **kwargs,
     )
 

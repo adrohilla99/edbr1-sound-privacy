@@ -255,3 +255,73 @@ and the resolved values are saved in each run's `config.yaml`. The original
 collapsed sweep (`results/us8k_vq_sweep_20260702_233340/`) remains reproducible
 by omitting the flag — it stays a documented finding (the nominal-vs-effective
 bitrate discrepancy).
+
+## UrbanSound8K — adversarial speech-suppression at the knee (Phase 3)
+
+Phase 2 showed classification utility is nearly free to compress, so the
+question is whether an adversarial objective can suppress *speech* leakage
+without spending that (cheap) utility. Setup: the training fold overlays
+LibriSpeech speech into each UrbanSound8K scene (prob 0.5, RMS SNR ∈ {0,5,10} dB),
+and a gradient-reversal adversary predicts a speech attribute from the code —
+**(N+1)-way: 0 = no speech, 1..20 = closed-set `train-clean-100` speaker**. The
+bitrate is fixed at the knee (1000 bits/s, anti-collapse codebook) and the GRL
+strength `lambda` is swept. **Overlay + labels are train-only; the val/test folds
+are clean UrbanSound8K**, so utility stays comparable and no speaker/fold crosses
+the boundary. `lambda=0` is the non-adversarial baseline *on the overlay stream*
+(not the Phase-2 clean 0.748).
+
+| lambda | macro-F1 (10-fold) | Δ vs λ=0 | train-adv acc (21-way) | perplexity | eff. bits/s |
+|--------|--------------------|----------|------------------------|------------|-------------|
+| 0.0 | 0.729 ± 0.059 | — | 0.501 | 674 | 940 |
+| 0.1 | 0.732 ± 0.063 | +0.003 | 0.504 | 657 | 936 |
+| 0.5 | 0.733 ± 0.065 | +0.004 | 0.501 | 608 | 925 |
+| 1.0 | 0.726 ± 0.060 | −0.003 | 0.501 | 580 | 918 |
+| 2.0 | 0.724 ± 0.050 | −0.004 | 0.502 | 584 | 919 |
+
+Full sweep 35,460 s (~9.85 h, one RTX 5060), artifact
+`results/us8k_adv_lambda_20260704_112525/`
+(`sweep.json`, `sweep.csv`, `lambda_vs_utility.png`); figure also regenerated to
+`docs/figures/lambda_vs_utility.png`.
+
+### Findings (plain, and carefully scoped)
+
+1. **GRL training is stable and costs no classification utility.** Across a 20×
+   range of `lambda` (0 → 2), macro-F1 stays flat at 0.724–0.733 — all within
+   one fold-σ of each other and of the `lambda=0` baseline (worst case −0.004 at
+   `lambda=2`). GRL training is notoriously unstable; here it was not. So the
+   adversarial objective is essentially *free on the utility axis* at this knee.
+2. **The training-time adversary never beats the trivial floor.** With
+   `overlay_prob=0.5`, half the training examples are no-speech, so predicting
+   "no speech" scores ~0.50. The 21-way adversary sits at **0.501–0.504 at every
+   lambda, including `lambda=0`** (no reversal) — i.e. the modest MLP cannot
+   extract speaker identity from the 1000 bits/s code even when *not* being
+   fought. So there is little speaker signal for the GRL to suppress, which is
+   consistent with utility being unmoved by `lambda`.
+3. **The overlay itself costs ~0.02 utility.** The `lambda=0` overlay baseline
+   (0.729) sits ~0.02 below the Phase-2 clean control (0.748): training on
+   50%-speech-contaminated scenes but testing clean is slightly harder, as
+   expected. This is the correct baseline for isolating the adversary's marginal
+   cost (≈ 0).
+
+### Important caveat — this is NOT the privacy result
+
+The adversary accuracy above is a **training-time sanity signal only**. It shows
+the adversary is weak (by design) and found little to suppress; it does **not**
+establish that the code is private. That is measured in **Phase 4** by separate,
+*stronger* probes (speaker-ID / ASR / inverter) trained against the frozen
+representation, plus a held-out speech-overlay evaluation. The honest Phase-3
+conclusion is narrow: *at the knee, the adversarial objective is stable and
+utility-neutral, but the training-time adversary was too weak to exert pressure —
+so a stronger probe (Phase 4) is needed to say anything about leakage.*
+
+### Reproduce
+
+```
+python -u scripts/run_lambda_sweep.py --wav-cache data/processed/wavcache
+```
+
+Base config `configs/adv/adv_lambda_base.yaml` (1000 bits/s, anti-collapse,
+overlay + adversary on); the runner sweeps `adversary.grl_lambda` over
+{0, 0.1, 0.5, 1.0, 2.0}, each a full 10-fold run, and the resolved `grl_lambda`
+is saved in every run's `config.yaml`. The training-adversary/overlay code is
+config-gated and off by default, so the non-adversarial paths are unchanged.

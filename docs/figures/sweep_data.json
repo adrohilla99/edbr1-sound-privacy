@@ -1,0 +1,139 @@
+{
+  "note": "Extracted from gitignored results/ sweeps; source of the committed figures.",
+  "control": {
+    "macro_f1_mean": 0.7476961663557053,
+    "macro_f1_std": 0.05759753987442078
+  },
+  "collapsed": [
+    {
+      "bits_per_second": 80.0,
+      "tokens_per_second": 8.0,
+      "macro_f1_mean": 0.5063867708978341,
+      "macro_f1_std": 0.10576196733120283,
+      "codebook_perplexity_mean": 4.242552117635535,
+      "codebook_fraction_used_mean": 0.005078125
+    },
+    {
+      "bits_per_second": 250.0,
+      "tokens_per_second": 25.0,
+      "macro_f1_mean": 0.6390457233767777,
+      "macro_f1_std": 0.071832876291598,
+      "codebook_perplexity_mean": 6.353524108018812,
+      "codebook_fraction_used_mean": 0.0072265625
+    },
+    {
+      "bits_per_second": 1000.0,
+      "tokens_per_second": 100.0,
+      "macro_f1_mean": 0.6895348475380219,
+      "macro_f1_std": 0.027442679660304586,
+      "codebook_perplexity_mean": 12.311081111711534,
+      "codebook_fraction_used_mean": 0.015625
+    },
+    {
+      "bits_per_second": 2000.0,
+      "tokens_per_second": 200.0,
+      "macro_f1_mean": 0.6870748382357083,
+      "macro_f1_std": 0.0535172800534596,
+      "codebook_perplexity_mean": 17.232547472695305,
+      "codebook_fraction_used_mean": 0.02470703125
+    },
+    {
+      "bits_per_second": 4000.0,
+      "tokens_per_second": 400.0,
+      "macro_f1_mean": 0.6972336057097415,
+      "macro_f1_std": 0.037779858661453086,
+      "codebook_perplexity_mean": 22.698200091926033,
+      "codebook_fraction_used_mean": 0.0384765625
+    },
+    {
+      "bits_per_second": 16000.0,
+      "tokens_per_second": 1600.0,
+      "macro_f1_mean": 0.7238179266873842,
+      "macro_f1_std": 0.039668390772027544,
+      "codebook_perplexity_mean": 25.267771651449824,
+      "codebook_fraction_used_mean": 0.0537109375
+    }
+  ],
+  "anticollapse": [
+    {
+      "bits_per_second": 80.0,
+      "tokens_per_second": 8.0,
+      "macro_f1_mean": 0.7426708726650322,
+      "macro_f1_std": 0.052797932629081695,
+      "codebook_perplexity_mean": 513.413740268457,
+      "codebook_fraction_used_mean": 0.9091796875
+    },
+    {
+      "bits_per_second": 250.0,
+      "tokens_per_second": 25.0,
+      "macro_f1_mean": 0.7542954072617499,
+      "macro_f1_std": 0.05883969754180497,
+      "codebook_perplexity_mean": 626.7124498477305,
+      "codebook_fraction_used_mean": 0.9875
+    },
+    {
+      "bits_per_second": 1000.0,
+      "tokens_per_second": 100.0,
+      "macro_f1_mean": 0.7225488500020286,
+      "macro_f1_std": 0.07118661770515211,
+      "codebook_perplexity_mean": 691.8913535340533,
+      "codebook_fraction_used_mean": 0.99658203125
+    },
+    {
+      "bits_per_second": 2000.0,
+      "tokens_per_second": 200.0,
+      "macro_f1_mean": 0.734001546109437,
+      "macro_f1_std": 0.05695159246293492,
+      "codebook_perplexity_mean": 691.2188249087401,
+      "codebook_fraction_used_mean": 0.9990234375
+    },
+    {
+      "bits_per_second": 4000.0,
+      "tokens_per_second": 400.0,
+      "macro_f1_mean": 0.7382962252151117,
+      "macro_f1_std": 0.0616208920539341,
+      "codebook_perplexity_mean": 625.8698956049508,
+      "codebook_fraction_used_mean": 0.99951171875
+    },
+    {
+      "bits_per_second": 16000.0,
+      "tokens_per_second": 1600.0,
+      "macro_f1_mean": 0.7514432538511887,
+      "macro_f1_std": 0.05169817920227437,
+      "codebook_perplexity_mean": 483.5563507056278,
+      "codebook_fraction_used_mean": 0.9998046875
+    }
+  ],
+  "lambda_sweep": [
+    {
+      "grl_lambda": 0.0,
+      "macro_f1_mean": 0.7288890985020997,
+      "macro_f1_std": 0.058887867169957385,
+      "adversary_train_acc_mean": 0.5012468167475644
+    },
+    {
+      "grl_lambda": 0.1,
+      "macro_f1_mean": 0.7317303510805895,
+      "macro_f1_std": 0.06306174922203107,
+      "adversary_train_acc_mean": 0.504284402302219
+    },
+    {
+      "grl_lambda": 0.5,
+      "macro_f1_mean": 0.7333784674162547,
+      "macro_f1_std": 0.06455019155380973,
+      "adversary_train_acc_mean": 0.5009158706220702
+    },
+    {
+      "grl_lambda": 1.0,
+      "macro_f1_mean": 0.7262168139062339,
+      "macro_f1_std": 0.06000585548757698,
+      "adversary_train_acc_mean": 0.5007372953616667
+    },
+    {
+      "grl_lambda": 2.0,
+      "macro_f1_mean": 0.7244078596763859,
+      "macro_f1_std": 0.05025535844701127,
+      "adversary_train_acc_mean": 0.5024714828217295
+    }
+  ]
+}

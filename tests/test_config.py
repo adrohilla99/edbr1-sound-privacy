@@ -178,3 +178,43 @@ def test_anti_collapse_flags_default_off_and_round_trip():
     )
     assert cfg.ema and cfg.kmeans_init and cfg.restart_dead_codes
     assert bottleneck_config_from_dict(dataclasses.asdict(cfg)) == cfg
+
+
+def test_overlay_and_adversary_config_validation_and_defaults():
+    from edbr1.config import AdversaryConfig, OverlayConfig
+
+    # Off by default so the non-adversarial paths are unchanged.
+    assert OverlayConfig().enabled is False
+    assert AdversaryConfig().enabled is False
+    with pytest.raises(ValueError, match="permitted subset"):
+        OverlayConfig(subset="train-other-500")
+    with pytest.raises(ValueError, match="overlay_prob"):
+        OverlayConfig(overlay_prob=1.5)
+    with pytest.raises(ValueError, match="snr_db"):
+        OverlayConfig(snr_db=())
+    with pytest.raises(ValueError, match="grl_lambda"):
+        AdversaryConfig(grl_lambda=-1.0)
+
+
+def test_adversary_requires_overlay():
+    # The adversary needs the overlay's speech labels; enabling it alone is rejected.
+    from edbr1.config import AdversaryConfig, OverlayConfig
+
+    with pytest.raises(ValueError, match="adversary.enabled requires overlay"):
+        TrainConfig(adversary=AdversaryConfig(enabled=True), overlay=OverlayConfig(enabled=False))
+    # Both on is fine.
+    cfg = TrainConfig(
+        model="encoder_classifier",
+        overlay=OverlayConfig(enabled=True),
+        adversary=AdversaryConfig(enabled=True, grl_lambda=0.5),
+    )
+    assert cfg.adversary.grl_lambda == 0.5
+
+
+def test_adv_lambda_base_config_is_at_the_knee_with_anti_collapse():
+    cfg = load_train_config("configs/adv/adv_lambda_base.yaml")
+    assert cfg.model == "encoder_classifier" and cfg.bottleneck.type == "vq"
+    assert cfg.bottleneck.ema and cfg.bottleneck.kmeans_init and cfg.bottleneck.restart_dead_codes
+    assert cfg.overlay.enabled and cfg.adversary.enabled
+    # 1000 bits/s knee: 100 tokens/s x log2(1024).
+    assert cfg.encoder.tokens_per_clip() / cfg.clip_seconds == pytest.approx(100.0)

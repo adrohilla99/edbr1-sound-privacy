@@ -1,6 +1,12 @@
 """Model architectures for EDBR.1."""
 from __future__ import annotations
 
+from edbr1.models.adversary import (
+    AdversarialEncoderClassifier,
+    AdversaryHead,
+    GradientReversalLayer,
+    gradient_reversal,
+)
 from edbr1.models.bottleneck import (
     BottleneckOutput,
     IdentityBottleneck,
@@ -27,4 +33,8 @@ __all__ = [
     "EncoderClassifier",
     "build_model",
     "nominal_frames_for",
+    "AdversarialEncoderClassifier",
+    "AdversaryHead",
+    "GradientReversalLayer",
+    "gradient_reversal",
 ]

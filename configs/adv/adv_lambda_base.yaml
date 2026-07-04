@@ -1,0 +1,95 @@
+# Adversarial speech-suppression -- base config for the lambda sweep (Phase 3).
+#
+# Fixed at the utility knee from Phase 2: 1000 bits/s nominal (100 tokens/s x
+# log2(1024)), anti-collapse ON so the codebook is actually used (effective rate
+# ~= nominal; perplexity ~690/1024 at this point). run_lambda_sweep.py sweeps
+# adversary.grl_lambda over {0, 0.1, 0.5, 1.0, 2.0}; lambda=0 is the
+# non-adversarial baseline *on the overlay stream* (NOT the Phase-2 clean 0.748).
+#
+# The speech attribute is (N+1)-way: 0 = no speech, 1..20 = closed-set
+# train-clean-100 speakers. Overlay + labels are TRAIN-ONLY; the val/test folds
+# are clean UrbanSound8K, so utility stays comparable and no speaker leaks across
+# the train/test boundary. The training-time adversary is deliberately modest and
+# its accuracy is a sanity signal only -- privacy is measured in Phase 4.
+seed: 1337
+batch_size: 64
+epochs: 80
+learning_rate: 0.001
+weight_decay: 0.0001
+num_workers: 6            # modest: overlay pool is shared memory, but cap worker copies
+clip_seconds: 4
+norm: per_band
+model: encoder_classifier
+test_folds: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+
+features:
+  sample_rate: 16000
+  n_mels: 64
+  window_ms: 25.0
+  hop_ms: 10.0
+  f_min: 0.0
+  f_max: null
+  n_fft: null
+  power: 2.0
+  top_db: 80.0
+
+encoder:
+  base_channels: 32
+  latent_dim: 128
+  latent_freq: 4
+  latent_frames: 100        # 400 tokens/clip -> 100 tokens/s -> 1000 bits/s
+  min_depth: 3
+  dropout: 0.3
+
+bottleneck:
+  type: vq
+  codebook_size: 1024
+  commitment_beta: 0.25
+  ema: true                 # anti-collapse combo (Phase 2b): codebook is used
+  kmeans_init: true
+  restart_dead_codes: true
+  restart_interval: 250
+  dead_code_threshold: 1.0
+  usage_decay: 0.99
+
+overlay:
+  enabled: true
+  librispeech_root: data/raw/librispeech/LibriSpeech
+  subset: train-clean-100   # closed speaker set drawn from a TRAINING subset only
+  num_speakers: 20
+  segments_per_speaker: 50
+  overlay_prob: 0.5
+  snr_db: [0.0, 5.0, 10.0]  # speech = signal; "loud argument" -> speech prominent
+  seed: 1337
+
+adversary:
+  enabled: true
+  grl_lambda: 1.0           # swept by run_lambda_sweep.py
+  warmup_epochs: 5          # linear GRL warmup (Ganin & Lempitsky 2015)
+  hidden_dim: 128
+
+augment:
+  enabled: true
+  spec_augment: true
+  time_masks: 2
+  time_mask_param: 24
+  freq_masks: 2
+  freq_mask_param: 8
+  spec_augment_prob: 1.0
+  time_shift: true
+  time_shift_ms: 100.0
+  pitch_shift: false
+  pitch_shift_steps: 2.0
+  time_stretch: false
+  time_stretch_min: 0.9
+  time_stretch_max: 1.1
+  waveform_prob: 0.5
+
+schedule:
+  scheduler: cosine
+  early_stopping: true
+  patience: 12
+  min_delta: 0.0
+  val_fold: null
+  plateau_factor: 0.5
+  plateau_patience: 5

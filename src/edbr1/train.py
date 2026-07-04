@@ -39,15 +39,23 @@ from tqdm import tqdm
 
 from edbr1 import bitrate
 from edbr1.config import ScheduleConfig, TrainConfig, config_to_dict, load_train_config
+from edbr1.data.librispeech import SpeechPool
+from edbr1.data.overlay import SpeechOverlay
 from edbr1.data.urbansound8k import (
     URBANSOUND8K_CLASSES,
+    OverlaySpeechDataset,
     UrbanSound8KDataset,
     carve_validation_fold,
     load_metadata,
     train_test_fold_split,
 )
 from edbr1.evaluate import classification_metrics, save_confusion_matrix
-from edbr1.models import EncoderClassifier, build_model
+from edbr1.models import (
+    AdversarialEncoderClassifier,
+    EncoderClassifier,
+    build_model,
+    nominal_frames_for,
+)
 from edbr1.models.bottleneck import BottleneckOutput
 from edbr1.utils import seed_everything, seed_worker
 
@@ -152,8 +160,9 @@ def _forward_model(model: nn.Module, x: Tensor) -> tuple[Tensor, BottleneckOutpu
     """
     out = model(x)
     if isinstance(out, tuple):
-        logits, bottleneck = out
-        return logits, bottleneck
+        # (logits, bottleneck) for EncoderClassifier, or
+        # (logits, bottleneck, adv_logits) for the adversarial model -- take the first two.
+        return out[0], out[1]
     return out, BottleneckOutput(
         latent=out, loss=out.new_zeros(()), indices=None, perplexity=None, codebook_size=0
     )
@@ -184,6 +193,8 @@ class EpochResult:
     y_true: list[int]
     y_pred: list[int]
     code_counts: Tensor | None  # (K,) accumulated code usage, or None
+    adv_loss: float = 0.0   # mean adversary cross-entropy (0 without an adversary)
+    adv_acc: float | None = None  # adversary speech-attribute accuracy (sanity only)
 
 
 def _run_epoch(
@@ -243,6 +254,76 @@ def _run_epoch(
     return EpochResult(running_ce / denom, running_vq / denom, y_true, y_pred, code_counts)
 
 
+def _grl_lambda(epoch: int, config: TrainConfig) -> float:
+    """GRL reversal strength with linear warmup over the first ``warmup_epochs``."""
+    adv = config.adversary
+    if adv.warmup_epochs <= 0:
+        return adv.grl_lambda
+    return adv.grl_lambda * min(1.0, epoch / adv.warmup_epochs)
+
+
+def _run_epoch_adversarial(
+    model: nn.Module,
+    loader: DataLoader[Any],
+    device: torch.device,
+    mean: Tensor,
+    std: Tensor,
+    *,
+    optimizer: torch.optim.Optimizer,
+    adv_criterion: nn.Module,
+) -> EpochResult:
+    """One adversarial training pass over the overlaid ``(x, y, speech_label)`` stream.
+
+    Optimises ``cross_entropy + bottleneck.loss + adversary_ce``; the gradient
+    reversal layer (its ``lambda_`` set by the caller for warmup) makes the
+    encoder fight the adversary while the adversary head learns at full rate. The
+    adversary's accuracy is tracked as an internal sanity signal only.
+    """
+    model.train()
+    ce_criterion = nn.CrossEntropyLoss()
+    running_ce = running_vq = running_adv = 0.0
+    adv_correct = 0
+    seen = 0
+    y_true: list[int] = []
+    y_pred: list[int] = []
+    codebook_size = _codebook_size(model)
+    code_counts = (
+        torch.zeros(codebook_size, dtype=torch.long) if codebook_size > 0 else None
+    )
+
+    with torch.set_grad_enabled(True):
+        for x, y, s in loader:
+            x = (x.to(device) - mean) / std
+            y = y.to(device)
+            s = s.to(device)
+            optimizer.zero_grad()
+            logits, bottleneck, adv_logits = model(x)
+            ce = ce_criterion(logits, y)
+            adv = adv_criterion(adv_logits, s)
+            loss = ce + bottleneck.loss + adv
+            loss.backward()
+            optimizer.step()
+
+            bs = y.size(0)
+            running_ce += float(ce.detach()) * bs
+            running_vq += float(bottleneck.loss.detach()) * bs
+            running_adv += float(adv.detach()) * bs
+            adv_correct += int((adv_logits.argmax(dim=1) == s).sum())
+            seen += bs
+            y_true.extend(y.tolist())
+            y_pred.extend(logits.argmax(dim=1).tolist())
+            if code_counts is not None and bottleneck.indices is not None:
+                code_counts += torch.bincount(
+                    bottleneck.indices.reshape(-1).to("cpu"), minlength=codebook_size
+                )
+
+    denom = max(seen, 1)
+    return EpochResult(
+        running_ce / denom, running_vq / denom, y_true, y_pred, code_counts,
+        adv_loss=running_adv / denom, adv_acc=adv_correct / denom,
+    )
+
+
 def _build_scheduler(
     optimizer: torch.optim.Optimizer, schedule: ScheduleConfig, epochs: int
 ) -> Any:
@@ -276,6 +357,7 @@ def train_one_fold(
     device: torch.device,
     class_names: Sequence[str],
     cache_dir: str | Path | None = None,
+    overlay: SpeechOverlay | None = None,
 ) -> dict[str, Any]:
     """Train on all folds except ``test_fold`` and evaluate on it.
 
@@ -286,6 +368,12 @@ def train_one_fold(
 
     ``cache_dir`` (if given) enables the dataset's on-disk waveform cache, which
     is bit-identical to recomputing and only removes the per-epoch decode cost.
+
+    When ``config.adversary.enabled`` and an ``overlay`` is supplied, the training
+    fold overlays speech and an :class:`AdversarialEncoderClassifier` is trained
+    with the gradient-reversal speech adversary. The validation and **test** folds
+    are always clean UrbanSound8K (no overlay, no adversary), so utility stays
+    comparable to the non-adversarial curve and no speaker leaks into the test set.
     """
     import pandas as pd
 
@@ -301,11 +389,21 @@ def train_one_fold(
         val_fold = _pick_val_fold(train_df, schedule)
         train_df, val_df = carve_validation_fold(train_df, val_fold)
 
+    adversary_on = config.adversary.enabled and overlay is not None
     augment = config.augment if config.augment.enabled else None
-    train_ds = UrbanSound8KDataset(
-        train_df, config.features, config.clip_seconds, train=True, augment=augment,
-        cache_dir=cache_dir,
-    )
+    train_ds: UrbanSound8KDataset
+    if adversary_on:
+        assert overlay is not None
+        # Train fold overlays speech and yields (mel, class, speech_label).
+        train_ds = OverlaySpeechDataset(
+            train_df, config.features, config.clip_seconds, overlay=overlay,
+            train=True, augment=augment, cache_dir=cache_dir,
+        )
+    else:
+        train_ds = UrbanSound8KDataset(
+            train_df, config.features, config.clip_seconds, train=True, augment=augment,
+            cache_dir=cache_dir,
+        )
     test_ds = UrbanSound8KDataset(
         test_df, config.features, config.clip_seconds, train=False, cache_dir=cache_dir
     )
@@ -345,7 +443,20 @@ def train_one_fold(
     mean, std = compute_norm_stats(norm_loader, per_band=config.norm == "per_band")
     mean, std = mean.to(device), std.to(device)
 
-    model = build_model(config, num_classes=len(class_names)).to(device)
+    model: nn.Module
+    adv_model: AdversarialEncoderClassifier | None = None
+    adv_criterion: nn.Module | None = None
+    if adversary_on:
+        assert overlay is not None
+        adv_model = AdversarialEncoderClassifier(
+            config.encoder, config.bottleneck, len(class_names), overlay.num_classes,
+            adversary_hidden=config.adversary.hidden_dim,
+            n_mels=config.features.n_mels, nominal_frames=nominal_frames_for(config),
+        ).to(device)
+        model = adv_model
+        adv_criterion = nn.CrossEntropyLoss()
+    else:
+        model = build_model(config, num_classes=len(class_names)).to(device)
     optimizer = torch.optim.Adam(
         model.parameters(),
         lr=config.learning_rate,
@@ -355,15 +466,24 @@ def train_one_fold(
 
     best_val = -1.0
     best_state: dict[str, Tensor] | None = None
+    best_adv_acc: float | None = None
     epochs_no_improve = 0
     epochs_trained = 0
     early_stopped = False
 
     for epoch in range(1, config.epochs + 1):
         epochs_trained = epoch
-        train_res = _run_epoch(
-            model, train_loader, device, mean, std, optimizer=optimizer
-        )
+        if adv_model is not None:
+            assert adv_criterion is not None
+            adv_model.grl.lambda_ = _grl_lambda(epoch, config)
+            train_res = _run_epoch_adversarial(
+                adv_model, train_loader, device, mean, std,
+                optimizer=optimizer, adv_criterion=adv_criterion,
+            )
+        else:
+            train_res = _run_epoch(
+                model, train_loader, device, mean, std, optimizer=optimizer
+            )
         msg = (
             f"    fold {test_fold} epoch {epoch:>3}/{config.epochs}  "
             f"loss={train_res.ce_loss:.4f}"
@@ -374,6 +494,12 @@ def train_one_fold(
             # Per-epoch train-set perplexity makes codebook collapse visible as it
             # happens (out of _codebook_size(model) codes), not just at fold end.
             msg += f" ppl={_perplexity_from_counts(train_res.code_counts):.1f}"
+        if train_res.adv_acc is not None:
+            # Adversary sanity signal (NOT a privacy result): loss/accuracy + lambda.
+            msg += (
+                f" adv={train_res.adv_loss:.3f} advacc={train_res.adv_acc:.2f}"
+                f" lam={_grl_lambda(epoch, config):.2f}"
+            )
 
         val_f1: float | None = None
         if val_loader is not None:
@@ -397,6 +523,7 @@ def train_one_fold(
                 best_state = {
                     k: v.detach().cpu().clone() for k, v in model.state_dict().items()
                 }
+                best_adv_acc = train_res.adv_acc  # adversary acc at the restored checkpoint
                 epochs_no_improve = 0
             else:
                 epochs_no_improve += 1
@@ -424,6 +551,12 @@ def train_one_fold(
     metrics["epochs_trained"] = epochs_trained
     metrics["early_stopped"] = early_stopped
     metrics.update(_bottleneck_metrics(config, test_res.code_counts))
+    if adversary_on:
+        # Internal sanity signal only (NOT a privacy result): the training-time
+        # adversary's speech-attribute accuracy at the restored checkpoint.
+        metrics["adversary_train_acc"] = (
+            best_adv_acc if schedule.early_stopping else train_res.adv_acc
+        )
     return metrics
 
 
@@ -511,6 +644,61 @@ def _summarise_bottleneck(
     }
 
 
+def _summarise_adversary(
+    config: TrainConfig, fold_metrics: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Adversary provenance + mean training accuracy (empty if no adversary).
+
+    The accuracy is the training-time adversary's own speech-attribute accuracy,
+    an internal sanity signal only -- privacy is measured in Phase 4 by separate,
+    stronger probes.
+    """
+    if not config.adversary.enabled:
+        return {}
+    accs = [
+        float(m["adversary_train_acc"])
+        for m in fold_metrics
+        if m.get("adversary_train_acc") is not None
+    ]
+    if not accs:
+        return {}
+    mean, std = _mean_std(accs)
+    return {
+        "grl_lambda": config.adversary.grl_lambda,
+        "warmup_epochs": config.adversary.warmup_epochs,
+        "adversary_classes": config.overlay.num_speakers + 1,
+        "num_speakers": config.overlay.num_speakers,
+        "overlay_prob": config.overlay.overlay_prob,
+        "snr_db": list(config.overlay.snr_db),
+        "adversary_train_acc_mean": mean,
+        "adversary_train_acc_std": std,
+    }
+
+
+def _build_overlay(
+    config: TrainConfig, cache_dir: str | Path | None
+) -> SpeechOverlay | None:
+    """Build the train-only speech overlay once per run (``None`` if disabled).
+
+    The closed speaker set is fold-independent, so the pool is decoded once (and
+    disk-cached under ``cache_dir``) and reused across every fold.
+    """
+    if not config.overlay.enabled:
+        return None
+    ov = config.overlay
+    pool = SpeechPool(
+        ov.librispeech_root,
+        subset=ov.subset,
+        num_speakers=ov.num_speakers,
+        segments_per_speaker=ov.segments_per_speaker,
+        segment_seconds=config.clip_seconds,
+        sample_rate=config.features.sample_rate,
+        seed=ov.seed,
+        cache_dir=cache_dir,
+    )
+    return SpeechOverlay(pool, overlay_prob=ov.overlay_prob, snr_choices=ov.snr_db)
+
+
 def run_training(
     config: TrainConfig,
     *,
@@ -550,12 +738,27 @@ def run_training(
             f"(codebook {config.bottleneck.codebook_size}, "
             f"grid {config.encoder.latent_freq}x{config.encoder.latent_frames})"
         )
+    overlay = _build_overlay(config, cache_dir)
+    if overlay is not None:
+        print(
+            f"Speech overlay: {config.overlay.num_speakers} speakers "
+            f"({config.overlay.subset}), prob {config.overlay.overlay_prob}, "
+            f"SNR {list(config.overlay.snr_db)} dB -> adversary {overlay.num_classes}-way"
+        )
+    if config.adversary.enabled:
+        print(
+            f"Adversary: GRL lambda {config.adversary.grl_lambda} "
+            f"(warmup {config.adversary.warmup_epochs} ep) -- training-time only, "
+            "NOT a Phase-4 privacy probe"
+        )
     print(f"Evaluating folds: {folds}")
 
     fold_metrics: list[dict[str, Any]] = []
     for test_fold in folds:
         print(f"\n=== Fold {test_fold} ===")
-        metrics = train_one_fold(metadata, test_fold, config, device, class_names, cache_dir)
+        metrics = train_one_fold(
+            metadata, test_fold, config, device, class_names, cache_dir, overlay
+        )
         fold_metrics.append(metrics)
         print(f"  fold {test_fold} macro-F1 = {metrics['macro_f1']:.4f}")
         save_confusion_matrix(
@@ -595,6 +798,9 @@ def run_training(
     bottleneck_summary = _summarise_bottleneck(config, fold_metrics)
     if bottleneck_summary:
         summary["bottleneck"] = bottleneck_summary
+    adversary_summary = _summarise_adversary(config, fold_metrics)
+    if adversary_summary:
+        summary["adversary"] = adversary_summary
     with (run_dir / "results.json").open("w", encoding="utf-8") as fh:
         json.dump(summary, fh, indent=2)
 
@@ -622,6 +828,14 @@ def run_training(
             f" (+/- {bottleneck_summary['codebook_perplexity_std']:.1f}) of "
             f"{bottleneck_summary['codebook_size']}; fraction used "
             f"{bottleneck_summary['codebook_fraction_used_mean']:.3f}"
+        )
+    if adversary_summary:
+        print(
+            "Adversary (SANITY ONLY, not a privacy result): train speech-attribute "
+            f"acc {adversary_summary['adversary_train_acc_mean']:.3f} "
+            f"(+/- {adversary_summary['adversary_train_acc_std']:.3f}) of "
+            f"{adversary_summary['adversary_classes']}-way at lambda "
+            f"{adversary_summary['grl_lambda']}"
         )
     print("Published small-CNN reference band: ~0.73-0.76 macro-F1")
     # The below-band advice targets the un-bottlenecked baseline/control. Under a
