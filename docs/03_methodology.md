@@ -131,7 +131,11 @@ is intentionally modest and weaker than those probes, by design.
 
 ## Evaluation probes (separate from training-time adversary)
 
-Deferred to Phase 4: independent, stronger speaker-ID / ASR / inverter probes
-trained against the frozen encoded representation, plus the held-out
-speech-overlay evaluation pipeline. These -- not the training-time adversary
-above -- produce the privacy numbers. Not implemented yet.
+**Implemented in Phase 4a/4b** ([`edbr1.probes`](../src/edbr1/probes/)): independent,
+stronger-than-adversary speaker-ID / ASR (CTC) / inverter probes trained against
+the **frozen** encoded representation, plus the speech-overlay SNR sweep and the
+ESC-50 transfer test. These -- not the training-time adversary above -- produce
+the privacy numbers, as empirical lower bounds. The full protocol is in
+[docs/04_evaluation_plan.md](04_evaluation_plan.md) and the results (leakage
+table, robustness, ESC-50, and the recommended operating point) in
+[RESULTS.md](../RESULTS.md).

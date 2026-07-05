@@ -2,7 +2,12 @@
 
 Privacy–utility–compute trade-offs of low-bitrate on-device audio encoders for environmental sound classification, evaluated against adversarial speech-leakage probes.
 
-Status: Baseline pipeline in place. Ethics approval: APPROVED.
+Status: **Feature-complete (Phases 2–4b).** Baseline → VQ bitrate sweep (+
+codebook-collapse fix) → adversarial GRL speech-suppression → evaluation-time
+leakage probes (speaker/ASR/inverter) → SNR robustness, ESC-50 transfer, and the
+privacy–utility–compute frontier. Full numbers + figures in
+[RESULTS.md](RESULTS.md); reproducible figures from committed data via
+`scripts/make_figures.py`. Ethics approval: APPROVED.
 
 > Download scripts are enabled but still gated: they require the explicit
 > `--i-have-ethics-approval` flag and verify dataset integrity before use.
