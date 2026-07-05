@@ -1,31 +1,65 @@
 # Evaluation
 
-To be drafted on Day 4.
-
 ## Utility metrics
 
-To be drafted on Day 4.
+Classification **macro-F1** under the official UrbanSound8K 10-fold CV (leak-
+guarded split, train-only normalisation/early-stopping). The no-bottleneck
+control (0.748 ± 0.058) is the utility ceiling; see [RESULTS.md](../RESULTS.md).
 
-## Privacy / leakage metrics
+## Privacy / leakage metrics (Phase 4a)
 
-To be drafted on Day 4.
+Privacy is measured by **independent, evaluation-time probes** that attack the
+**frozen** encoder's emitted codes — deliberately separate from, and stronger
+than, the Phase-3 training-time adversary. Every number is an **empirical lower
+bound** on leakage: a stronger future probe can only do better.
+
+**Frozen-encoder protocol.** For each operating point (bitrate × adversarial λ)
+the trained encoder+bottleneck is frozen (eval mode, no grad — asserted by a
+weight fingerprint), and only its discrete codes are exposed. Probes learn their
+own embedding of the transmitted indices, so they are at least as strong as the
+Phase-3 adversary (which read the codebook latent directly).
+
+**Leak guards (the load-bearing discipline).** Probe speech is drawn from
+**dev-clean**, whose speakers are disjoint from the encoder's `train-clean-100`
+overlay speakers — so any success is representational leakage, not memorisation.
+Splits are verified at construction (raising on any leak):
+* speaker-ID: a closed set of speakers on both sides, **utterances disjoint**;
+* ASR / inversion: **speakers disjoint** train/test (unseen-speaker generalisation).
+Probe speech is overlaid on held-out (fold-10) UrbanSound8K scenes at the
+deployment SNRs before encoding.
+
+**The three probes and their metrics:**
+* **Speaker-ID** — a closed-set classifier (larger than the Phase-3 head):
+  **top-1 accuracy vs chance** (1/N).
+* **ASR** — a from-scratch CTC recogniser (Graves et al. 2006) on codes:
+  **WER and CER vs the ~1.0 unintelligible ceiling**. (A pretrained-recogniser
+  attacker is a stronger future probe, not run here.)
+* **Inverter** — a learned code→log-mel decoder: **log-spectral distance (LSD)
+  and MSE** against the clean source speech, vs a **silence floor** (no-information
+  baseline) and the high-bitrate point as a loose reference. PESQ/STOI are noted
+  where the packages/waveform reconstruction are unavailable.
+
+The headline privacy question (RQ3) is whether adversarial λ reduces probe success
+**beyond** what bitrate alone achieves, at matched honest bitrates.
 
 ## Compute metrics
 
-To be drafted on Day 4.
+Encoder parameter count (on-device budget < 500K), nominal and perplexity-
+effective bitrate (`tokens/s · log2(codebook)` and `tokens/s · log2(perplexity)`),
+and wall time per run. Reported alongside each sweep in [RESULTS.md](../RESULTS.md).
 
 ## Pareto / trade-off analysis
 
-To be drafted on Day 4.
-
-## Ablations
-
-To be drafted on Day 4.
+Deferred to Phase 4b: synthesise the utility-vs-leakage Pareto frontier across
+bitrate and λ from the Phase-2/3/4a results.
 
 ## Robustness and generalisation
 
-To be drafted on Day 4.
+Deferred to Phase 4b: the speech-overlay robustness curve (varying SNR at test),
+and cross-dataset generalisation (ESC-50).
 
 ## Failure analysis
 
-To be drafted on Day 4.
+Per-class confusion (saved per fold) and the operating points where utility or
+privacy behaviour changes qualitatively (codebook collapse at low bitrate before
+the anti-collapse fix; probe leakage by content type in Phase 4a).

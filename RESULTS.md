@@ -325,3 +325,80 @@ overlay + adversary on); the runner sweeps `adversary.grl_lambda` over
 {0, 0.1, 0.5, 1.0, 2.0}, each a full 10-fold run, and the resolved `grl_lambda`
 is saved in every run's `config.yaml`. The training-adversary/overlay code is
 config-gated and off by default, so the non-adversarial paths are unchanged.
+
+## UrbanSound8K — evaluation-time speech-leakage probes (Phase 4a)
+
+Phase 3 left an ambiguity: the training adversary never beat the no-speech floor,
+so it was unknown whether the low-bitrate code destroys speech or the adversary
+was just too weak. Phase 4a resolves it with **three independent, stronger probes
+that attack the frozen encoder's codes** — the actual privacy measurement.
+Discipline: the encoder is frozen (weights fingerprinted, verified unchanged);
+probe speech is **held-out dev-clean speakers, disjoint from the encoder's
+train-clean-100 overlay speakers** (so any success is representational leakage,
+not memorisation); splits are utterance-disjoint (speaker-ID) or speaker-disjoint
+(ASR/inversion) and **verified at construction**. Every number is an **empirical
+LOWER bound** — a stronger future probe can only do better. The speaker probe is
+~325K params (≈30× the ~11K Phase-3 adversary head).
+
+| operating point | utility F1 | speaker top-1 (chance 0.05) | ASR WER / CER (ceiling ~1.0) | inverter LSD dB (silence floor 75.5) |
+|-----------------|-----------|-----------------------------|------------------------------|--------------------------------------|
+| 250 b/s, λ=0    | 0.772 | 0.125 (2.5× chance) | 1.12 / 0.80 | 17.2 |
+| 1000 b/s, λ=0   | 0.804 | 0.112 (2.2× chance) | 1.12 / 0.77 | 16.1 |
+| 1000 b/s, λ=2   | 0.807 | **0.062 (1.2× chance)** | 1.12 / 0.77 | 16.4 |
+| 16000 b/s, λ=0  | 0.783 | 0.087 (1.7× chance) | 1.22 / 0.80 | 15.2 |
+
+(speaker n_test=80, ASR n_test 23–86, inverter n_test=90. Frozen encoders are
+single-fold retrains of the Phase-2/3 operating points; artifact
+`results/us8k_probes_20260705_011207/`, encoders in `results/probe_encoders/`.)
+
+### Findings — leakage is real but content-specific
+
+1. **Raw acoustic content leaks heavily.** The learned inverter reconstructs the
+   clean-speech mel far better than the silence floor (LSD ~15–17 dB vs 75.5).
+   The reconstructions (`docs/figures/probe_inversion_1000bps.png`) recover the
+   **coarse speech envelope / syllable rhythm**, but not fine spectral detail.
+2. **Linguistic content does not leak** — the from-scratch CTC ASR probe is at or
+   above the ~1.0 WER ceiling at every point (it recovers no words). Either the
+   code genuinely destroys phonetic detail or a *pretrained* recogniser (a
+   stronger, un-run probe) would do better; the from-scratch attacker found none.
+3. **Speaker identity leaks modestly** — top-1 is 1.7–2.5× chance at λ=0
+   (0.087–0.125 vs 0.05). Small but consistently above chance, and above the
+   Phase-3 adversary's floor. (n_test=80, so ±~0.03; treat the ordering across
+   bitrates as within noise.)
+
+### Answering the Phase-3 ambiguity, and RQ3
+
+- **The training adversary was too weak, not "bitrate destroyed speech".** The
+  stronger probes extract what the training adversary could not: the speech
+  envelope (inverter) and modest speaker identity — from the same 1000 b/s code
+  where the Phase-3 adversary sat at the floor. But the picture is **mixed by
+  content type**: envelope + coarse identity survive; words do not (by the CTC
+  probe). It is genuinely both interpretations, split by content.
+- **RQ3 — does adversarial λ help beyond bitrate?** At 1000 b/s, λ=2 roughly
+  **halves speaker top-1 (0.112 → 0.062, toward chance)** at no utility cost
+  (0.804 → 0.807) — so the adversary reduces *identity* leakage beyond what
+  bitrate alone does. It does **not** reduce acoustic-envelope leakage (inverter
+  LSD 16.1 → 16.4, unchanged) or ASR (already failed). So the λ objective buys
+  some speaker privacy specifically, essentially for free, but leaves the coarse
+  acoustic envelope intact.
+
+### Caveats
+
+These are lower bounds from *these* probes. ASR is a from-scratch CTC (a
+pretrained-recogniser attacker is the stronger, un-run probe); PESQ/STOI were not
+computed (packages absent + they need waveform reconstruction), so the inverter
+is reported by LSD/MSE vs a silence floor; speaker n_test is small. None of this
+inflates privacy — a stronger probe can only raise the leakage estimates.
+
+### Reproduce
+
+```
+python -u scripts/train_probe_encoders.py --wav-cache data/processed/wavcache
+python -u scripts/run_probes.py
+```
+
+The first trains the four frozen encoders (250/λ0, 1000/λ0, 1000/λ2, 16000/λ0,
+single held-out fold) and writes a manifest; the second freezes each, builds the
+leak-guarded dev-clean splits, extracts codes, and trains the three probes. The
+speech-overlay robustness curve, ESC-50 and the utility-vs-leakage Pareto
+synthesis are Phase 4b.

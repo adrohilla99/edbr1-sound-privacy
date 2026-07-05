@@ -358,6 +358,7 @@ def train_one_fold(
     class_names: Sequence[str],
     cache_dir: str | Path | None = None,
     overlay: SpeechOverlay | None = None,
+    save_checkpoint: Path | None = None,
 ) -> dict[str, Any]:
     """Train on all folds except ``test_fold`` and evaluate on it.
 
@@ -541,6 +542,22 @@ def train_one_fold(
     if schedule.early_stopping and best_state is not None:
         model.load_state_dict(best_state)
 
+    if save_checkpoint is not None:
+        # Frozen-encoder bundle for the Phase-4 probes: weights + the norm stats
+        # and config needed to reconstruct the model and re-emit codes.
+        save_checkpoint.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(
+            {
+                "model_state": model.state_dict(),
+                "norm_mean": mean.detach().cpu(),
+                "norm_std": std.detach().cpu(),
+                "config": config_to_dict(config),
+                "class_names": list(class_names),
+                "test_fold": test_fold,
+            },
+            save_checkpoint,
+        )
+
     test_res = _run_epoch(model, test_loader, device, mean, std, optimizer=None)
     metrics = classification_metrics(test_res.y_true, test_res.y_pred, class_names)
     metrics["test_fold"] = test_fold
@@ -707,6 +724,7 @@ def run_training(
     device: torch.device,
     test_folds: Sequence[int] | None = None,
     cache_dir: str | Path | None = None,
+    save_checkpoints: bool = False,
 ) -> dict[str, Any]:
     """Run the CV protocol for ``config``, write its artifact dir, return the summary.
 
@@ -756,8 +774,10 @@ def run_training(
     fold_metrics: list[dict[str, Any]] = []
     for test_fold in folds:
         print(f"\n=== Fold {test_fold} ===")
+        checkpoint = run_dir / f"encoder_fold{test_fold}.pt" if save_checkpoints else None
         metrics = train_one_fold(
-            metadata, test_fold, config, device, class_names, cache_dir, overlay
+            metadata, test_fold, config, device, class_names, cache_dir, overlay,
+            save_checkpoint=checkpoint,
         )
         fold_metrics.append(metrics)
         print(f"  fold {test_fold} macro-F1 = {metrics['macro_f1']:.4f}")
