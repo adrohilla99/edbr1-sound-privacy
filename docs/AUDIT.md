@@ -41,15 +41,25 @@ Nothing referenced in RESULTS.md is missing from the tree.
 
 ## 3. Tests / lint / types — PASS
 
-- `pytest`: **89 passed, 0 failed, 0 skipped** (matches the claimed 89). Zero skips
-  means the data-guarded leak-guard/probe/ESC-50 tests all actually **run** (the
-  datasets are present locally). *Caveat: on a clone without the datasets, the
-  data-guarded tests would skip; the pure leak-guard logic tests (synthetic) run
-  regardless.*
+- `pytest` **with datasets present locally (+ ml deps): 89 passed, 0 skipped,
+  0 failed** (matches the claimed 89). This is the condition on the training
+  machine, so all data-guarded leak-guard/loader tests actually run.
+- **On a clone WITHOUT the datasets (ml deps still installed): 85 passed,
+  4 skipped, 0 failed.** The 4 skips are the only real-data-dependent tests, each
+  behind a `skipif`: `test_esc50::test_real_esc50_metadata_shape`,
+  `test_overlay::{test_speechpool_closed_set_is_from_the_training_subset_only,
+  test_overlay_dataset_yields_triple_base_yields_pair}`,
+  `test_probe_splits::test_real_dev_clean_split_disjoint_from_train_clean_100`.
+  The pure leak-guard *logic* tests (synthetic inputs) run regardless, so the
+  disjointness invariants are still verified without the datasets.
+- (Without the `ml` extra installed, the `importorskip(torch/torchaudio)` tests
+  also skip — only the pure-Python config/split/metric tests run.)
+- **For the write-up:** state testing as "89/89 with datasets present; 85 pass +
+  4 data-guarded skips on a dataset-free clone" rather than an unconditional pass.
 - `ruff check .`: clean.
 - `mypy src/ scripts/`: clean (41 source files).
 
-## 4. Claim-to-artifact traceability — NEEDS-ATTENTION (fixed)
+## 4. Claim-to-artifact traceability — PASS
 
 `results/` is gitignored, so the committed source of truth for figures is
 `docs/figures/sweep_data.json`. It contains: `control`, `collapsed` (6),
@@ -57,15 +67,18 @@ Nothing referenced in RESULTS.md is missing from the tree.
 `esc50` (2) — i.e. **every VQ-sweep / λ / Phase-4a leakage / robustness / ESC-50
 number is preserved in committed data.**
 
-- **Gap found:** the **baseline ablation** numbers (plain CNN 0.626; canonical
-  0.746; 22.05 kHz 0.739; the 3-fold 0.698/0.711; the full 10-fold sample-rate A/B
-  per-fold table) were **not** in any committed structured artifact — only in
-  RESULTS.md prose and the gitignored `results/us8k_baseline_*/`.
-- **Fix (this session):** committed `docs/figures/baseline_ablation.json`, a
-  path-free snapshot of those numbers transcribed from RESULTS.md. Every
-  dissertation-needed number now lives in a committed file.
+- The **baseline ablation** numbers were originally only in RESULTS.md prose +
+  gitignored `results/us8k_baseline_*/`. First committed as a transcription, then
+  (follow-up task, commit after `402a625`) **re-extracted byte-exactly from the
+  source `results.json` files by `scripts/extract_baseline.py`** and committed with
+  provenance. `docs/figures/baseline_ablation.json` is now source-derived, not
+  hand-typed, and carries per-fold vectors + std for every run + the control.
+- **Reconciliation:** the extracted numbers match the previous transcription
+  (all within 1e-3) AND match RESULTS.md prose exactly (plain 0.6257→0.626;
+  canonical 0.7459±0.0495; 22.05 kHz 0.7393±0.0504; control 0.7477±0.0576; both
+  A/B per-fold vectors identical). **No RESULTS.md correction was needed.**
 - Note: no *figure* depends on the baseline snapshot, so it is not read by
-  `make_figures.py`; it is a data-preservation record only.
+  `make_figures.py`; it is a source-derived data-preservation record.
 
 ## 5. Figures reproduce from committed data — PASS
 
@@ -150,12 +163,14 @@ number is preserved in committed data.**
 - [x] TODO Writing section added.
 - [x] This `docs/AUDIT.md`.
 
+**Resolved in the follow-up task:**
+- [x] **Baseline snapshot fidelity** — `scripts/extract_baseline.py` now extracts the
+  baseline/sample-rate/control numbers byte-exactly from the source `results.json`
+  and writes `docs/figures/baseline_ablation.json` with provenance. Reconciled
+  against both the old transcription and RESULTS.md: everything matched, no
+  correction needed (§4).
+
 **For your decision (not changed — flag only):**
-- **Baseline snapshot fidelity:** the committed baseline numbers are transcribed
-  from RESULTS.md prose (the per-run `results/us8k_baseline_*/results.json` are
-  gitignored). If you want a byte-exact structured snapshot, we could add a small
-  `make_figures --refresh`-style extractor for the baseline runs — but that needs
-  the gitignored artifacts present and is an engineering change, so deferred.
 - **RESULTS.md figure citations:** a couple point at gitignored `results/.../*.png`;
   cite the `docs/figures/` equivalents in the dissertation.
 - **Overall verdict:** codebase is complete, consistent, and reproducible from
