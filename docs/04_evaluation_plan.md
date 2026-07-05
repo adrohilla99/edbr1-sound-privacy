@@ -48,15 +48,28 @@ Encoder parameter count (on-device budget < 500K), nominal and perplexity-
 effective bitrate (`tokens/s · log2(codebook)` and `tokens/s · log2(perplexity)`),
 and wall time per run. Reported alongside each sweep in [RESULTS.md](../RESULTS.md).
 
-## Pareto / trade-off analysis
+## Pareto / trade-off analysis (Phase 4b)
 
-Deferred to Phase 4b: synthesise the utility-vs-leakage Pareto frontier across
-bitrate and λ from the Phase-2/3/4a results.
+The privacy–utility–compute frontier assembles every Phase 2–4a operating point
+into a ``(utility macro-F1, per-channel leakage, compute)`` triple. Leakage is
+**never collapsed into a single scalar** — it is reported per channel (speaker /
+ASR / inverter) because the result is content-specific. Compute is the effective
+(perplexity-based) bits/s plus the on-device encoder parameter count. The frontier
+data is assembled into the committed ``docs/figures/sweep_data.json`` and every
+figure is regenerated from it by ``scripts/make_figures.py`` (see RESULTS.md for
+the recommended operating point).
 
-## Robustness and generalisation
+## Robustness and generalisation (Phase 4b)
 
-Deferred to Phase 4b: the speech-overlay robustness curve (varying SNR at test),
-and cross-dataset generalisation (ESC-50).
+* **Test-time SNR robustness** — at the 1000 bits/s knee (λ=0 and λ=2), utility and
+  the three leakage metrics are re-measured across a −10…+10 dB speech-to-scene
+  SNR grid (the "loud argument" condition), leak-guarded as in Phase 4a. Utility
+  is robust; acoustic-envelope leakage rises with speech loudness; identity
+  suppression by λ holds across SNR.
+* **ESC-50 cross-dataset transfer** — a light head on the *frozen* code under
+  ESC-50's official 5-fold split (encoder never trained on ESC-50) measures whether
+  the low-bitrate representation carries transferable scene information. It does
+  (~18× chance). Both in RESULTS.md.
 
 ## Failure analysis
 

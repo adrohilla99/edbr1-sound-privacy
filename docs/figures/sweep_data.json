@@ -1,5 +1,5 @@
 {
-  "note": "Extracted from gitignored results/ sweeps; source of the committed figures.",
+  "note": "Extracted from gitignored results/ runs; source of the committed figures.",
   "control": {
     "macro_f1_mean": 0.7476961663557053,
     "macro_f1_std": 0.05759753987442078
@@ -134,6 +134,194 @@
       "macro_f1_mean": 0.7244078596763859,
       "macro_f1_std": 0.05025535844701127,
       "adversary_train_acc_mean": 0.5024714828217295
+    }
+  ],
+  "leakage": [
+    {
+      "bits_per_second": 250.0,
+      "grl_lambda": 0.0,
+      "utility_macro_f1": 0.7724905423232565,
+      "speaker_top1": 0.125,
+      "speaker_chance": 0.05,
+      "asr_wer": 1.1219512195121952,
+      "inverter_lsd": 17.21378517150879,
+      "inverter_lsd_silence_floor": 75.49803161621094
+    },
+    {
+      "bits_per_second": 1000.0,
+      "grl_lambda": 0.0,
+      "utility_macro_f1": 0.8040526594940186,
+      "speaker_top1": 0.11249999701976776,
+      "speaker_chance": 0.05,
+      "asr_wer": 1.1248439450686643,
+      "inverter_lsd": 16.125356674194336,
+      "inverter_lsd_silence_floor": 75.49803161621094
+    },
+    {
+      "bits_per_second": 1000.0,
+      "grl_lambda": 2.0,
+      "utility_macro_f1": 0.8067470076659449,
+      "speaker_top1": 0.0625,
+      "speaker_chance": 0.05,
+      "asr_wer": 1.1198501872659177,
+      "inverter_lsd": 16.394437789916992,
+      "inverter_lsd_silence_floor": 75.49803161621094
+    },
+    {
+      "bits_per_second": 16000.0,
+      "grl_lambda": 0.0,
+      "utility_macro_f1": 0.7834461290456012,
+      "speaker_top1": 0.08749999850988388,
+      "speaker_chance": 0.05,
+      "asr_wer": 1.2203258339798293,
+      "inverter_lsd": 15.210871696472168,
+      "inverter_lsd_silence_floor": 75.49803161621094
+    }
+  ],
+  "robustness": [
+    {
+      "name": "bps01000_l0",
+      "grl_lambda": 0.0,
+      "snr_db": -10.0,
+      "utility_macro_f1": 0.8159457466535633,
+      "speaker_top1": 0.10000000149011612,
+      "speaker_chance": 0.05,
+      "asr_wer": 1.122347066167291,
+      "inverter_lsd": 17.136913299560547,
+      "inverter_lsd_silence_floor": 75.49803161621094
+    },
+    {
+      "name": "bps01000_l0",
+      "grl_lambda": 0.0,
+      "snr_db": -5.0,
+      "utility_macro_f1": 0.8273097258650678,
+      "speaker_top1": 0.13750000298023224,
+      "speaker_chance": 0.05,
+      "asr_wer": 1.118601747815231,
+      "inverter_lsd": 16.959718704223633,
+      "inverter_lsd_silence_floor": 75.49803161621094
+    },
+    {
+      "name": "bps01000_l0",
+      "grl_lambda": 0.0,
+      "snr_db": 0.0,
+      "utility_macro_f1": 0.8116884104215302,
+      "speaker_top1": 0.11249999701976776,
+      "speaker_chance": 0.05,
+      "asr_wer": 1.1248439450686643,
+      "inverter_lsd": 16.64695167541504,
+      "inverter_lsd_silence_floor": 75.49803161621094
+    },
+    {
+      "name": "bps01000_l0",
+      "grl_lambda": 0.0,
+      "snr_db": 5.0,
+      "utility_macro_f1": 0.8061870520989288,
+      "speaker_top1": 0.125,
+      "speaker_chance": 0.05,
+      "asr_wer": 1.1285892634207242,
+      "inverter_lsd": 15.81879997253418,
+      "inverter_lsd_silence_floor": 75.49803161621094
+    },
+    {
+      "name": "bps01000_l0",
+      "grl_lambda": 0.0,
+      "snr_db": 10.0,
+      "utility_macro_f1": 0.7902488975451777,
+      "speaker_top1": 0.08749999850988388,
+      "speaker_chance": 0.05,
+      "asr_wer": 1.1410736579275904,
+      "inverter_lsd": 15.373910903930664,
+      "inverter_lsd_silence_floor": 75.49803161621094
+    },
+    {
+      "name": "bps01000_l2",
+      "grl_lambda": 2.0,
+      "snr_db": -10.0,
+      "utility_macro_f1": 0.8168227421777722,
+      "speaker_top1": 0.08749999850988388,
+      "speaker_chance": 0.05,
+      "asr_wer": 1.101123595505618,
+      "inverter_lsd": 17.439130783081055,
+      "inverter_lsd_silence_floor": 75.49803161621094
+    },
+    {
+      "name": "bps01000_l2",
+      "grl_lambda": 2.0,
+      "snr_db": -5.0,
+      "utility_macro_f1": 0.8280751808253463,
+      "speaker_top1": 0.08749999850988388,
+      "speaker_chance": 0.05,
+      "asr_wer": 1.1323345817727841,
+      "inverter_lsd": 16.924365997314453,
+      "inverter_lsd_silence_floor": 75.49803161621094
+    },
+    {
+      "name": "bps01000_l2",
+      "grl_lambda": 2.0,
+      "snr_db": 0.0,
+      "utility_macro_f1": 0.8209797641096099,
+      "speaker_top1": 0.08749999850988388,
+      "speaker_chance": 0.05,
+      "asr_wer": 1.1173533083645444,
+      "inverter_lsd": 16.59210968017578,
+      "inverter_lsd_silence_floor": 75.49803161621094
+    },
+    {
+      "name": "bps01000_l2",
+      "grl_lambda": 2.0,
+      "snr_db": 5.0,
+      "utility_macro_f1": 0.8159294302281778,
+      "speaker_top1": 0.0625,
+      "speaker_chance": 0.05,
+      "asr_wer": 1.1385767790262171,
+      "inverter_lsd": 16.0127010345459,
+      "inverter_lsd_silence_floor": 75.49803161621094
+    },
+    {
+      "name": "bps01000_l2",
+      "grl_lambda": 2.0,
+      "snr_db": 10.0,
+      "utility_macro_f1": 0.7963282052895102,
+      "speaker_top1": 0.11249999701976776,
+      "speaker_chance": 0.05,
+      "asr_wer": 1.1323345817727841,
+      "inverter_lsd": 15.716094970703125,
+      "inverter_lsd_silence_floor": 75.49803161621094
+    }
+  ],
+  "esc50": [
+    {
+      "name": "bps01000_l0",
+      "bits_per_second": 1000.0,
+      "grl_lambda": 0.0,
+      "esc50_macro_f1_mean": 0.3614345750549941,
+      "esc50_macro_f1_std": 0.012892158729945443,
+      "per_fold": [
+        0.36428129859850145,
+        0.3505579615714896,
+        0.3692063982473144,
+        0.37951074876973384,
+        0.34361646808793117
+      ],
+      "chance": 0.02,
+      "us8k_utility_macro_f1": 0.8040526594940186
+    },
+    {
+      "name": "bps01000_l2",
+      "bits_per_second": 1000.0,
+      "grl_lambda": 2.0,
+      "esc50_macro_f1_mean": 0.3433434226607063,
+      "esc50_macro_f1_std": 0.024837555263383798,
+      "per_fold": [
+        0.3501373323958463,
+        0.3586482156646243,
+        0.33778485536090863,
+        0.3713806623896138,
+        0.29876604749253827
+      ],
+      "chance": 0.02,
+      "us8k_utility_macro_f1": 0.8067470076659449
     }
   ]
 }

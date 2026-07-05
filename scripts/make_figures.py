@@ -33,9 +33,13 @@ FIG_DIR = PROJECT_ROOT / "docs" / "figures"
 DATA_JSON = FIG_DIR / "sweep_data.json"
 
 # Live (gitignored) sweeps the committed data is extracted from.
-DEFAULT_COLLAPSED = PROJECT_ROOT / "results" / "us8k_vq_sweep_20260702_233340" / "sweep.json"
-DEFAULT_ANTICOLLAPSE = PROJECT_ROOT / "results" / "us8k_vq_sweep_20260703_171719" / "sweep.json"
-DEFAULT_LAMBDA = PROJECT_ROOT / "results" / "us8k_adv_lambda_20260704_112525" / "sweep.json"
+_RESULTS = PROJECT_ROOT / "results"
+DEFAULT_COLLAPSED = _RESULTS / "us8k_vq_sweep_20260702_233340" / "sweep.json"
+DEFAULT_ANTICOLLAPSE = _RESULTS / "us8k_vq_sweep_20260703_171719" / "sweep.json"
+DEFAULT_LAMBDA = _RESULTS / "us8k_adv_lambda_20260704_112525" / "sweep.json"
+DEFAULT_LEAKAGE = _RESULTS / "us8k_probes_20260705_011207" / "leakage.json"
+DEFAULT_ROBUSTNESS = _RESULTS / "us8k_robustness_20260705_014042" / "robustness.json"
+DEFAULT_ESC50 = _RESULTS / "esc50_transfer_20260705_095150" / "esc50.json"
 
 _POINT_KEYS = (
     "bits_per_second", "tokens_per_second", "macro_f1_mean", "macro_f1_std",
@@ -55,15 +59,31 @@ def _lambda_points(sweep: dict[str, Any]) -> list[dict[str, float]]:
     return sorted(rows, key=lambda r: r["grl_lambda"])
 
 
+def _leakage_points(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Flatten the Phase-4a leakage records to the fields the figures plot."""
+    out = []
+    for r in records:
+        out.append({
+            "bits_per_second": r["bits_per_second"], "grl_lambda": r["grl_lambda"],
+            "utility_macro_f1": r["utility_macro_f1"],
+            "speaker_top1": r["speaker_id"]["top1"], "speaker_chance": r["speaker_id"]["chance"],
+            "asr_wer": r["asr"].get("wer"), "inverter_lsd": r["inverter"]["lsd"],
+            "inverter_lsd_silence_floor": r["inverter"]["lsd_silence_floor"],
+        })
+    return sorted(out, key=lambda r: (r["bits_per_second"], r["grl_lambda"]))
+
+
 def build_data(
-    collapsed_json: Path, anticollapse_json: Path, lambda_json: Path | None = None
+    collapsed_json: Path, anticollapse_json: Path, lambda_json: Path | None = None,
+    leakage_json: Path | None = None, robustness_json: Path | None = None,
+    esc50_json: Path | None = None,
 ) -> dict[str, Any]:
-    """Extract the committed, path-free figure data from the live sweep.json files."""
+    """Extract the committed, path-free figure data from the live result JSONs."""
     collapsed = json.loads(collapsed_json.read_text(encoding="utf-8"))
     anti = json.loads(anticollapse_json.read_text(encoding="utf-8"))
     control = anti.get("control") or collapsed.get("control") or {}
     data: dict[str, Any] = {
-        "note": "Extracted from gitignored results/ sweeps; source of the committed figures.",
+        "note": "Extracted from gitignored results/ runs; source of the committed figures.",
         "control": {
             "macro_f1_mean": control.get("macro_f1_mean"),
             "macro_f1_std": control.get("macro_f1_std"),
@@ -73,6 +93,12 @@ def build_data(
     }
     if lambda_json is not None and lambda_json.exists():
         data["lambda_sweep"] = _lambda_points(json.loads(lambda_json.read_text(encoding="utf-8")))
+    if leakage_json is not None and leakage_json.exists():
+        data["leakage"] = _leakage_points(json.loads(leakage_json.read_text(encoding="utf-8")))
+    if robustness_json is not None and robustness_json.exists():
+        data["robustness"] = json.loads(robustness_json.read_text(encoding="utf-8"))
+    if esc50_json is not None and esc50_json.exists():
+        data["esc50"] = json.loads(esc50_json.read_text(encoding="utf-8"))
     return data
 
 
@@ -183,6 +209,85 @@ def plot_lambda_utility(data: dict[str, Any], out: Path) -> None:
     plt.close(fig)
 
 
+def _save(fig: Any, out: Path) -> None:
+    fig.tight_layout()
+    fig.savefig(out, dpi=130)
+    plt.close(fig)
+
+
+def plot_leakage_vs_bitrate(data: dict[str, Any], out: Path) -> None:
+    """Per-channel leakage vs bitrate (lambda=0) -- deliberately NOT one scalar."""
+    pts = [p for p in (data.get("leakage") or []) if p["grl_lambda"] == 0.0]
+    if not pts:
+        return
+    bps = [p["bits_per_second"] for p in pts]
+    fig, axes = plt.subplots(1, 3, figsize=(12, 3.8))
+    axes[0].plot(bps, [p["speaker_top1"] for p in pts], "o-", color="C0")
+    axes[0].axhline(pts[0]["speaker_chance"], ls=":", color="0.5", label="chance")
+    axes[0].set_title("speaker-ID top-1")
+    axes[1].plot(bps, [p["asr_wer"] for p in pts], "o-", color="C1")
+    axes[1].axhline(1.0, ls=":", color="0.5", label="ceiling")
+    axes[1].set_title("ASR word error rate")
+    axes[2].plot(bps, [p["inverter_lsd"] for p in pts], "o-", color="C2")
+    axes[2].axhline(pts[0]["inverter_lsd_silence_floor"], ls=":", color="0.5", label="silence")
+    axes[2].set_title("inverter LSD (dB)")
+    for ax, ylab in zip(axes, ("top-1", "WER", "LSD dB"), strict=True):
+        ax.set_xscale("log")
+        ax.set_xlabel("bits/s (log)")
+        ax.set_ylabel(ylab)
+        ax.grid(True, which="both", ls=":", alpha=0.4)
+        ax.legend()
+    fig.suptitle("Leakage vs bitrate, per channel (lambda=0) -- empirical lower bounds")
+    _save(fig, out)
+
+
+def plot_utility_vs_speaker_leakage(data: dict[str, Any], out: Path) -> None:
+    """RQ3 exhibit: utility vs speaker-leakage at 1000 b/s, lambda 0 vs 2."""
+    knee = [p for p in (data.get("leakage") or []) if p["bits_per_second"] == 1000.0]
+    if not knee:
+        return
+    fig, ax = plt.subplots(figsize=(6, 4.5))
+    for p in knee:
+        color = "C0" if p["grl_lambda"] == 0 else "C3"
+        ax.scatter(p["utility_macro_f1"], p["speaker_top1"], s=140, color=color)
+        ax.annotate(f"lambda={p['grl_lambda']:g}", (p["utility_macro_f1"], p["speaker_top1"]),
+                    textcoords="offset points", xytext=(8, 4))
+    ax.axhline(knee[0]["speaker_chance"], ls=":", color="0.5", label="speaker chance")
+    ax.set_xlabel("utility (UrbanSound8K macro-F1)")
+    ax.set_ylabel("speaker-ID top-1 (leakage; lower = more private)")
+    ax.set_title("Utility vs speaker leakage at 1000 b/s")
+    ax.legend()
+    ax.grid(True, ls=":", alpha=0.4)
+    _save(fig, out)
+
+
+def plot_robustness(data: dict[str, Any], out: Path) -> None:
+    """Utility (left) and speaker leakage (right) vs test-time SNR, lambda 0 vs 2."""
+    recs = data.get("robustness")
+    if not recs:
+        return
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4))
+    rows: list[dict[str, Any]] = []
+    for lam, color in ((0.0, "C0"), (2.0, "C3")):
+        rows = sorted((r for r in recs if r["grl_lambda"] == lam), key=lambda r: r["snr_db"])
+        snr = [r["snr_db"] for r in rows]
+        lbl = f"lambda={lam:g}"
+        ax1.plot(snr, [r["utility_macro_f1"] for r in rows], "o-", color=color, label=lbl)
+        ax2.plot(snr, [r["speaker_top1"] for r in rows], "o-", color=color, label=lbl)
+    if rows:
+        ax2.axhline(rows[0]["speaker_chance"], ls=":", color="0.5", label="chance")
+    ax1.set_title("utility vs SNR")
+    ax1.set_ylabel("macro-F1")
+    ax2.set_title("speaker leakage vs SNR")
+    ax2.set_ylabel("speaker top-1")
+    for ax in (ax1, ax2):
+        ax.set_xlabel("speech-to-scene SNR (dB)")
+        ax.grid(True, ls=":", alpha=0.4)
+        ax.legend()
+    fig.suptitle("Test-time SNR robustness at 1000 b/s (loud-argument condition)")
+    _save(fig, out)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -192,11 +297,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--collapsed", type=Path, default=DEFAULT_COLLAPSED)
     parser.add_argument("--anticollapse", type=Path, default=DEFAULT_ANTICOLLAPSE)
     parser.add_argument("--lambda-sweep", type=Path, default=DEFAULT_LAMBDA, dest="lambda_json")
+    parser.add_argument("--leakage", type=Path, default=DEFAULT_LEAKAGE, dest="leakage_json")
+    parser.add_argument("--robustness", type=Path, default=DEFAULT_ROBUSTNESS,
+                        dest="robustness_json")
+    parser.add_argument("--esc50", type=Path, default=DEFAULT_ESC50, dest="esc50_json")
     args = parser.parse_args(argv)
 
     FIG_DIR.mkdir(parents=True, exist_ok=True)
     if args.refresh or not DATA_JSON.exists():
-        data = build_data(args.collapsed, args.anticollapse, args.lambda_json)
+        data = build_data(args.collapsed, args.anticollapse, args.lambda_json,
+                          args.leakage_json, args.robustness_json, args.esc50_json)
         DATA_JSON.write_text(json.dumps(data, indent=2), encoding="utf-8")
         print(f"wrote {DATA_JSON}")
     else:
@@ -206,6 +316,9 @@ def main(argv: list[str] | None = None) -> int:
     plot_collapsed_vs_fixed(data, FIG_DIR / "collapsed_vs_fixed.png")
     plot_codebook_usage(data, FIG_DIR / "codebook_usage.png")
     plot_lambda_utility(data, FIG_DIR / "lambda_vs_utility.png")
+    plot_leakage_vs_bitrate(data, FIG_DIR / "leakage_vs_bitrate.png")
+    plot_utility_vs_speaker_leakage(data, FIG_DIR / "utility_vs_speaker_leakage.png")
+    plot_robustness(data, FIG_DIR / "robustness_vs_snr.png")
     print(f"figures written to {FIG_DIR}")
     return 0
 

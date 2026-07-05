@@ -41,6 +41,7 @@ class FrozenEncoder:
             p.requires_grad_(False)
         self.encoder = model.encoder
         self.bottleneck = model.bottleneck
+        self.classifier = model.classifier  # frozen scene classifier (for utility)
         # Mel extraction stays on CPU: overlay/mix happens on CPU waveforms and
         # emit_codes moves the resulting mels to the device. (Keeping it on the
         # device would break on the CPU waveforms fed by extract_codes.)
@@ -72,6 +73,22 @@ class FrozenEncoder:
         out = self.bottleneck(self.encoder(x))
         assert out.indices is not None, "frozen encoder has no discrete bottleneck"
         return out.indices
+
+    @torch.no_grad()
+    def classify(self, mels: Tensor) -> Tensor:
+        """(B, 1, n_mels, frames) -> class logits from the frozen scene classifier."""
+        x = (mels.to(self.device) - self.mean) / self.std
+        return self.classifier(self.bottleneck(self.encoder(x)).latent)
+
+    @torch.no_grad()
+    def emit_pooled_latent(self, mels: Tensor) -> Tensor:
+        """(B, 1, n_mels, frames) -> (B, D) global-avg-pooled quantised latent.
+
+        The frozen representation fed to the ESC-50 linear/light transfer head.
+        """
+        x = (mels.to(self.device) - self.mean) / self.std
+        latent = self.bottleneck(self.encoder(x)).latent  # (B, D, F', T')
+        return torch.nn.functional.adaptive_avg_pool2d(latent, 1).flatten(1)
 
 
 class ScenePool:
