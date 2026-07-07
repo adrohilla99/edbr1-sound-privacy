@@ -55,14 +55,14 @@ use. Nothing downloaded is ever committed (see `data/README.md` and
 
 ## Licensing audit
 
-| Dataset      | Licence                          | Commercial use | Attribution | Notes for the dissertation |
+| Dataset      | Licence                          | Commercial use | Attribution | Notes |
 |--------------|----------------------------------|----------------|-------------|----------------------------|
 | UrbanSound8K | CC BY-NC 4.0                     | **No**         | Required    | Non-commercial only. This is academic research, which is in scope; cite Salamon, Jacoby & Bello (2014). Do **not** redistribute the audio. |
 | LibriSpeech  | CC BY 4.0                        | Yes            | Required    | Most permissive of the three; cite Panayotov et al. (2015). Derived from public-domain LibriVox readings. |
 | ESC-50       | CC BY-NC 4.0 (audio), mixed      | **No**         | Required    | Some clips carry their own Freesound attributions; consult the upstream `LICENSE` before publishing any clip or derivative. Cite Piczak (2015). |
 
 **Implications.** Two of the three datasets are **non-commercial** (CC
-BY-NC). This dissertation is non-commercial academic research, so use is
+BY-NC). This project is non-commercial academic research, so use is
 permitted, but: (1) the original startup motivation is kept strictly
 separate (the brief already states this), (2) no raw audio is redistributed
 or committed, and (3) every dataset is cited. Any future commercial

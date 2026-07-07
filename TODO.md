@@ -23,10 +23,10 @@
 - [x] Probe networks (speaker-ID, ASR, inverter) — Phase 4a: independent, stronger-than-adversary probes attack the frozen code with leak-guarded dev-clean splits. Leakage table in [RESULTS.md](RESULTS.md), artifact `results/us8k_probes_20260705_011207/`. Finding: acoustic envelope + modest speaker identity leak (probes beat the Phase-3 floor); ASR fails (no words); adversarial λ=2 halves speaker top-1 (0.112→0.062) at no utility cost. Empirical lower bounds.
 - [x] Pareto evaluation script — Phase 4b: test-time SNR robustness (`run_overlay_robustness.py`), ESC-50 frozen transfer (`run_esc50_probe.py`, ~18× chance), and the privacy–utility–compute frontier folded into `make_figures.py` (utility-vs-leakage, leakage-vs-bitrate per channel, robustness figures). Recommended point **1000 b/s, λ=2**: F1 0.807, speaker 1.2× chance, no words, envelope leaks. See [RESULTS.md](RESULTS.md). **Codebase now feature-complete; remaining work is dissertation writing.**
 
-## Writing (engineering complete; see docs/AUDIT.md)
+## Writing (engineering complete)
 
 - [ ] Populate the dissertation draft's results tables/figures from [RESULTS.md](RESULTS.md) and `docs/figures/` (cite the committed `docs/figures/*.png`, not the gitignored `results/` copies).
 - [ ] Write the Results chapter: utility-vs-bitrate + collapse fix (RQ1), adversarial λ (RQ2), leakage probes + content-specific finding (RQ3), robustness + ESC-50 transfer.
 - [ ] Write the Discussion: the "envelope leaks, words don't, λ halves identity for free" story; recommended operating point.
-- [ ] Write the Limitations chapter from the honest-gaps register in docs/AUDIT.md (MACs/s deferred, PESQ/STOI omitted, from-scratch ASR, small probe n, single-fold frozen encoders, lower-bound framing).
+- [ ] Write the Limitations chapter (MACs/s deferred, PESQ/STOI omitted in favour of LSD, from-scratch rather than pretrained ASR, small probe n, single-fold frozen encoders, empirical-lower-bound framing).
 - [ ] Methods chapter: align prose with the as-built docs/03 + docs/04.

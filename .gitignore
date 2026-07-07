@@ -39,3 +39,4 @@ results/
 wandb/
 mlruns/
 lightning_logs/
+docs/AUDIT.md
